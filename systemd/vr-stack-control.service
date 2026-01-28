@@ -1,0 +1,24 @@
+[Unit]
+Description=VR Stack Control (Tracking -> Server -> VR app)
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=XDG_CONFIG_HOME=%h/.config
+Environment=XDG_RUNTIME_DIR=%t
+
+ExecStart=/usr/bin/env bash -lc "%h/bin/vr-stack-run.sh"
+
+# Treat SIGTERM as a clean stop
+SuccessExitStatus=0 143
+Restart=no
+
+# Kill everything in this unit’s cgroup on stop
+KillMode=control-group
+TimeoutStopSec=10
+SendSIGKILL=yes
+
+[Install]
+WantedBy=default.target

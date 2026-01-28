@@ -1,0 +1,24 @@
+# VR Stack configuration (bash-sourced)
+
+# --- Tracking / body tracking app ---
+# Examples:
+#   TRACK_CMD="/opt/slimevr/slimevr"
+#   TRACK_CMD="mytracker --flags"
+#   TRACK_CMD=""     # empty = skip tracking app
+TRACK_CMD="/opt/slimevr/slimevr"
+
+# Pattern that indicates tracking backend is ready (used for wait-for-ready)
+# SlimeVR example:
+TRACK_READY_PGREP="slimevr\.jar"
+
+# --- Server component ---
+SERVER_CMD="wivrn-server"
+SERVER_PGREP="wivrn-server"
+
+# --- VR app (OpenXR client) ---
+VR_CMD="wayvr"
+VR_PGREP="(^|/)(wayvr)(\\s|$)"
+
+# --- OpenXR runtime pin ---
+# Keep this unless you intentionally change your OpenXR runtime.
+OPENXR_JSON="/usr/share/openxr/1/openxr_wivrn.json"
