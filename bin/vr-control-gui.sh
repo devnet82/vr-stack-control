@@ -8,6 +8,60 @@ RUN_LOG="$HOME/.local/share/vr-stack.log"
 
 mkdir -p "$CFG_DIR"
 
+PROFILES_DIR="$CFG_DIR/profiles"
+mkdir -p "$PROFILES_DIR"
+
+list_profiles() { ls -1 "$PROFILES_DIR"/*.conf 2>/dev/null | xargs -n1 basename | sed 's/\.conf$//' || true; }
+
+current_profile_name() {
+  if [[ -L "$CFG" ]]; then
+    basename "$(readlink -f "$CFG")" | sed 's/\.conf$//'
+  else
+    echo "default"
+  fi
+}
+
+ensure_default_profile() {
+  if [[ ! -f "$PROFILES_DIR/default.conf" ]]; then
+    [[ -f "$CFG" && ! -L "$CFG" ]] && cp -f "$CFG" "$PROFILES_DIR/default.conf" || true
+  fi
+  if [[ ! -L "$CFG" ]]; then
+    rm -f "$CFG"
+    ln -sf "$PROFILES_DIR/default.conf" "$CFG"
+  fi
+}
+
+switch_profile() {
+  ensure_default_profile
+  local items choice
+  items="$(list_profiles)"
+  [[ -z "$items" ]] && yad --info --title="VR Control Panel" --text="No profiles found." && return 0
+  choice="$(printf "%s\n" $items | yad --list --title="Select Profile" --column="Profile" --height=420 --width=420 --center --button="Select":0 --button="Cancel":1 2>/dev/null)" || return 1
+  [[ -z "$choice" ]] && return 0
+  ln -sf "$PROFILES_DIR/$choice.conf" "$CFG"
+}
+
+save_current_as_profile() {
+  ensure_default_profile
+  local name
+  name="$(yad --entry --title="New Profile" --text="Profile name:" --entry-text="new-profile" --center 2>/dev/null)" || return 1
+  [[ -z "${name// }" ]] && return 0
+  name="$(sed -E 's/[^a-zA-Z0-9._-]+/-/g' <<<"$name")"
+  cp -f "$(readlink -f "$CFG")" "$PROFILES_DIR/$name.conf"
+  ln -sf "$PROFILES_DIR/$name.conf" "$CFG"
+}
+
+delete_profile() {
+  ensure_default_profile
+  local items choice cur
+  cur="$(current_profile_name)"
+  items="$(list_profiles | sed "/^$cur$/d")"
+  [[ -z "$items" ]] && yad --info --title="VR Control Panel" --text="No deletable profiles (current is '$cur')." && return 0
+  choice="$(printf "%s\n" $items | yad --list --title="Delete Profile" --column="Profile" --height=420 --width=420 --center --button="Delete":0 --button="Cancel":1 2>/dev/null)" || return 1
+  [[ -z "$choice" ]] && return 0
+  rm -f "$PROFILES_DIR/$choice.conf"
+}
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 is_active() { systemctl --user is-active --quiet "$SERVICE"; }
@@ -15,6 +69,21 @@ is_enabled() { systemctl --user is-enabled --quiet "$SERVICE"; }
 
 status_str() { is_active && echo "RUNNING" || echo "STOPPED"; }
 autostart_str() { is_enabled && echo "ENABLED" || echo "DISABLED"; }
+
+adb_state() {
+  if ! command -v adb >/dev/null 2>&1; then echo "no-adb"; return; fi
+  if adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{found=1} END{exit !found}'; then echo "connected"; return; fi
+  if adb devices 2>/dev/null | awk 'NR>1 && ($2=="unauthorized" || $2=="offline"){found=1} END{exit !found}'; then echo "unauthorized"; return; fi
+  echo "disconnected"
+}
+
+wivrn_state() {
+  local regex="${WIVRN_CONNECTED_REGEX:-connected|connection established|client.*connected|new client|session.*created}"
+  local text
+  text="$(journalctl --user -u "$SERVICE" -n 250 --no-pager 2>/dev/null || true)"
+  [[ -z "$text" ]] && { echo "unknown"; return; }
+  echo "$text" | rg -i -q "$regex" && echo "connected" || echo "disconnected"
+}
 
 strip_exec_placeholders() {
   # Remove common DesktopEntry placeholders like %u %U %f %F etc.
@@ -169,6 +238,8 @@ show_logs() {
 }
 
 load_cfg
+ensure_default_profile
+load_cfg
 
 while true; do
   state="$(status_str)"
@@ -177,7 +248,12 @@ while true; do
   choice="$(yad --title="VR Control Panel" --center --width=760 --height=390 --borders=12 \
     --list --column="Action" \
     "Status: $state" \
+    "Quest ADB: $(adb_state) | WiVRn: $(wivrn_state)" \
     "Autostart on login: $auto" \
+    "Profile: $(current_profile_name)" \
+    "Select profile…" \
+    "Save current as new profile…" \
+    "Delete a profile…" \
     "Set Tracking app…" \
     "Set Server app…" \
     "Set VR app…" \
@@ -193,6 +269,15 @@ while true; do
     --button="Select":0 --button="Close":1 2>/dev/null)" || exit 0
 
   case "$choice" in
+    "Select profile…")
+      switch_profile || true
+      ;;
+    "Save current as new profile…")
+      save_current_as_profile || true
+      ;;
+    "Delete a profile…")
+      delete_profile || true
+      ;;
     "Set Tracking app…")
       TRACK_CMD="$(pick_from_menu "Tracking app" "${TRACK_CMD:-}")" || continue
       [[ "$TRACK_CMD" == *slimevr* ]] && TRACK_READY_PGREP="slimevr\.jar"

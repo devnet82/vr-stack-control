@@ -8,8 +8,11 @@ systemctl --user disable "$SERVICE" >/dev/null 2>&1 || true
 
 rm -f "$HOME/bin/vr-stack-run.sh"
 rm -f "$HOME/bin/vr-control-gui.sh"
+rm -f "$HOME/bin/vr-tray.sh"
+rm -f "$HOME/bin/quest-watch.sh"
 rm -f "$HOME/.config/systemd/user/$SERVICE"
 rm -f "$HOME/.local/share/applications/vr-control-panel.desktop"
+rm -f "$HOME/.local/share/applications/vr-tray.desktop"
 
 systemctl --user daemon-reload
 

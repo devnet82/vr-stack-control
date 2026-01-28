@@ -55,6 +55,41 @@ Then open your app launcher and run **“VR Control Panel”**.
 
 ## Usage
 
+## Tray icon (optional)
+
+Launch **“VR Tray (VR Stack Control)”** from your app launcher to get a tray icon with quick actions:
+
+- Open Control Panel
+- Start/Stop/Restart VR
+- Toggle autostart
+- Show logs
+- Quest + WiVRn status
+- Start/Stop Quest+WiVRn watcher
+
+## Profiles
+
+Profiles are stored in:
+
+- `~/.config/vr-stack/profiles/*.conf`
+
+The currently active profile is a symlink:
+
+- `~/.config/vr-stack/stack.conf -> ~/.config/vr-stack/profiles/<profile>.conf`
+
+This makes switching setups (different trackers, different servers) fast and reproducible.
+
+## Quest + WiVRn auto-detect (optional)
+
+- Quest detection uses **ADB** (`android-tools`)
+- WiVRn “connected” detection is heuristic by scanning recent logs (configurable regex)
+
+Arch/CachyOS optional deps:
+
+```bash
+sudo pacman -S --needed android-tools libnotify
+```
+
+
 - **Set Tracking app…** pick a tracker (or “None”)
 - **Set Server app…** pick a server (or “None”)
 - **Set VR app…** pick your OpenXR client (or “None”)

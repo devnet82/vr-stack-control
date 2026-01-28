@@ -22,8 +22,11 @@ mkdir -p "$HOME/.config/vr-stack"
 
 install -m 0755 "$ROOT_DIR/bin/vr-stack-run.sh" "$HOME/bin/vr-stack-run.sh"
 install -m 0755 "$ROOT_DIR/bin/vr-control-gui.sh" "$HOME/bin/vr-control-gui.sh"
+install -m 0755 "$ROOT_DIR/bin/vr-tray.sh" "$HOME/bin/vr-tray.sh"
+install -m 0755 "$ROOT_DIR/bin/quest-watch.sh" "$HOME/bin/quest-watch.sh"
 install -m 0644 "$ROOT_DIR/systemd/vr-stack-control.service" "$HOME/.config/systemd/user/vr-stack-control.service"
 install -m 0644 "$ROOT_DIR/desktop/vr-control-panel.desktop" "$HOME/.local/share/applications/vr-control-panel.desktop"
+install -m 0644 "$ROOT_DIR/desktop/vr-tray.desktop" "$HOME/.local/share/applications/vr-tray.desktop"
 
 # Only create config if user doesn't already have one
 if [[ ! -f "$HOME/.config/vr-stack/stack.conf" ]]; then
@@ -34,6 +37,7 @@ systemctl --user daemon-reload
 
 # Make desktop file "trusted" on some desktops (best effort)
 gio set "$HOME/.local/share/applications/vr-control-panel.desktop" metadata::trusted true 2>/dev/null || true
+gio set "$HOME/.local/share/applications/vr-tray.desktop" metadata::trusted true 2>/dev/null || true
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 echo "Installed VR Stack Control."
