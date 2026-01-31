@@ -30,212 +30,211 @@ vr-control --gui
 Note: Tray integration was removed in v0.6.21. Closing the window exits normally.
 
 
-WiVRn + WayVR + SlimeVR on CachyOS (Quest 3)
-FIRST-TIME SETUP — COMPLETE IDIOT-PROOF GUIDE
+======================================================================
+WI VRN + WAYVR + SLIMEVR ON CACHYOS (QUEST 3)
+COMPLETE FIRST-TIME SETUP GUIDE
+======================================================================
+
+This is the exact process that was followed to get a fully working
+WiVRn + WayVR + SlimeVR setup on CachyOS using a Quest 3.
+
+Nothing here is theoretical.
+Every command listed below was actually run.
 
 Follow every step in order.
 Do not skip steps.
-Do not start apps manually unless told to.
 
-WHAT YOU WILL END WITH (IMPORTANT)
 
-When finished:
+WHAT YOU END UP WITH
 
-Quest 3 connects wirelessly to PC
+- Quest 3 connects wirelessly to the PC
+- WayVR runs without OpenXR errors
+- SlimeVR body tracking works
+- No duplicate launches
+- Correct OpenXR runtime every time
 
-WayVR runs without errors
+Final stack order:
 
-SlimeVR body tracking works
+SlimeVR (SolarXR IPC)
+WiVRn OpenXR runtime
+WiVRn server
+Quest WiVRn APK
+WayVR
 
-One desktop button starts everything
 
-No duplicate launches
+REQUIREMENTS
 
-Correct OpenXR runtime every time
+- CachyOS (Wayland session)
+- Meta Quest 3
+- USB cable (one-time setup)
+- PC and Quest on the same Wi-Fi
+- Internet access
 
-Final stack:
-
-SlimeVR → SolarXR → WiVRn OpenXR → WiVRn Server → Quest WiVRn APK → WayVR
-
-REQUIREMENTS (READ FIRST)
-
-You need:
-
-PC running CachyOS (Wayland session)
-
-Quest 3 headset
-
-USB cable (one-time setup)
-
-PC + Quest on same Wi-Fi
-
-Internet access
 
 PART 1 — INSTALL PC SOFTWARE
 
-Open a terminal and run exactly:
+Run exactly:
 
+```bash
 yay -S wivrn-full-git
 sudo pacman -S wayvr slimevr android-tools github-cli
+```
 
+This installs:
 
-What this installs:
+- WiVRn server (working AUR build)
+- WayVR compositor
+- SlimeVR server
+- ADB (for Quest)
+- GitHub CLI (for APK download)
 
-WiVRn server (beta / working build)
-
-WayVR compositor
-
-SlimeVR server
-
-ADB (for Quest)
-
-GitHub CLI (for APK download)
 
 VERIFY COMMANDS EXIST (DO NOT SKIP)
+
+```bash
 command -v wayvr
 command -v wivrn-server
 command -v slimevr
+```
 
+If any command is missing, stop and fix it before continuing.
 
-If any command is missing, stop here and fix before continuing.
 
 PART 2 — QUEST DEVELOPER MODE + ADB
-2.1 Enable Developer Mode (PHONE)
 
-On your phone:
+Enable developer mode (phone):
 
 Meta Quest app
-
 Devices → Quest 3
-
 Developer Mode → ON
 
-Reboot headset
+Reboot the headset.
 
-2.2 Enable USB Debugging (HEADSET)
 
-Inside headset:
+Enable USB debugging (headset):
 
 Settings → System → Developer
-
 Enable USB Debugging
 
-2.3 Connect Quest to PC
 
-Plug Quest into PC via USB.
+Connect Quest to PC:
 
-Run:
-
+```bash
 adb kill-server
 adb start-server
 adb devices
+```
 
-
-Inside headset:
-
-Accept USB debugging
-
-Tick Always allow
+Inside the headset:
+- Accept USB debugging
+- Tick Always allow
 
 Verify again:
 
+```bash
 adb devices
-
-
-You must see:
-
-XXXXXXXXXXXX    device
-
-
-If not → stop and fix before continuing.
-
-PART 3 — DOWNLOAD & INSTALL QUEST APK (WORKING METHOD)
-3.1 Login to GitHub CLI
-gh auth login
-gh auth status
-
-
-You must see:
-
-Logged in to github.com
-
-3.2 Download WiVRn Quest APK (Release)
-
-We use the official GitHub Actions build.
-
-Example run ID you used:
-
-21321590049
-
-
-Download:
-
-gh run download 21321590049 --repo WiVRn/WiVRn --name apk-Release
-
-
-Extract:
-
-unzip -o *.zip
-ls *.apk
-
-
-You must see one APK file.
-
-3.3 Install APK to Quest
-
-Inside headset:
-
-Settings → Apps → WiVRn → Uninstall
-
-Reboot headset
-
-Then install:
-
-adb install -r *.apk
-
+```
 
 Expected output:
 
-Success
+XXXXXXXXXXXX    device
 
+If not, stop and fix before continuing.
+
+
+PART 3 — DOWNLOAD AND INSTALL QUEST APK
+
+Login to GitHub CLI:
+
+```bash
+gh auth login
+gh auth status
+```
+
+You must see:
+Logged in to github.com
+
+
+Download WiVRn Quest APK (GitHub Actions build)
+
+Example run ID used:
+21321590049
+
+```bash
+gh run download 21321590049 --repo WiVRn/WiVRn --name apk-Release
+```
+
+Extract:
+
+```bash
+unzip -o *.zip
+ls *.apk
+```
+
+You must see exactly one APK.
+
+
+Install APK to Quest:
+
+Inside headset:
+Settings → Apps → WiVRn → Uninstall
+Reboot headset
+
+Install:
+
+```bash
+adb install -r *.apk
+```
+
+Expected output:
+Success
 
 Verify:
 
+```bash
 adb shell pm list packages | grep -i wivrn
-
+```
 
 Expected:
-
 package:org.wivrn.client
 
-3.4 REQUIRED QUEST SETTING (SLIMEVR USERS)
+
+REQUIRED QUEST SETTING (SLIMEVR USERS)
 
 Inside Quest WiVRn app:
+- Disable Enable body tracking
+- Let SlimeVR / SolarXR provide tracking
 
-❌ Disable Enable body tracking
-
-✅ Let SlimeVR / SolarXR provide tracking
-
-(This avoids known conflicts.)
 
 PART 4 — FIX OPENXR RUNTIME (CRITICAL STEP)
 
-This is the step that made WayVR work.
-
 Run:
 
+```bash
 mkdir -p ~/.config/openxr/1
 ln -sf /usr/share/openxr/1/openxr_wivrn.json ~/.config/openxr/1/active_runtime.json
-
+```
 
 Verify:
 
+```bash
 readlink -f ~/.config/openxr/1/active_runtime.json
-
+```
 
 It must output:
-
 /usr/share/openxr/1/openxr_wivrn.json
 
+If it does not, stop and fix before continuing.
 
-If it does not → STOP and fix before continuing.
+
+RESULT
+
+At this point you have:
+
+- Correct OpenXR runtime (WiVRn)
+- WiVRn server running correctly
+- Quest APK matched to the server
+- WayVR launching cleanly
+- SlimeVR providing trackers properly
+
+This is the exact configuration that worked.
