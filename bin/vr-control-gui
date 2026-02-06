@@ -4,13 +4,14 @@ import time
 import json
 import subprocess
 import shlex
+import re
 from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib
 
-APP_VERSION = "v0.6.21"
+APP_VERSION = "v0.6.53"
 
 STACK_SERVICE = "vr-stack-control.service"
 
@@ -27,6 +28,10 @@ DEFAULTS = {
     "server_pgrep": "wivrn-server",
     "vr_pgrep": "(^|/)(wayvr)(\\s|$)",
     "profile": "default",
+    "tracking_enabled": "true",
+    "tracking_stop_when_disabled": "true",
+    "openxr_json": "/usr/share/openxr/1/openxr_wivrn.json",
+    "xr_runtime": "wivrn",
 }
 
 
@@ -96,6 +101,10 @@ def cfg_load():
         "server_pgrep": ["server_pgrep", "SERVER_PGREP"],
         "vr_pgrep": ["vr_pgrep", "VR_PGREP"],
         "profile": ["profile", "PROFILE"],
+        "tracking_enabled": ["tracking_enabled", "TRACKING_ENABLED"],
+        "tracking_stop_when_disabled": ["tracking_stop_when_disabled", "TRACK_STOP_WHEN_DISABLED", "TRACKING_STOP_WHEN_DISABLED"],
+        "openxr_json": ["openxr_json", "OPENXR_JSON"],
+        "xr_runtime": ["xr_runtime", "XR_RUNTIME"],
     }
     for key, aliases in mapping.items():
         for a in aliases:
@@ -214,6 +223,109 @@ def markup_escape(text: str) -> str:
         t = text or ""
         return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+
+
+def apply_openxr_runtime(json_path: str) -> tuple[bool, str]:
+    """Best-effort: set active OpenXR runtime symlink."""
+    try:
+        jp = Path(json_path)
+        if not jp.exists():
+            return False, f"Missing runtime JSON: {json_path}"
+        dst_dir = Path.home() / ".config" / "openxr" / "1"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / "active_runtime.json"
+        try:
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+        except Exception:
+            pass
+        dst.symlink_to(jp)
+        return True, str(jp)
+    except Exception as e:
+        return False, str(e)
+
+
+def detect_steamvr_openxr_json() -> str:
+    candidates = [
+        "/usr/share/openxr/1/openxr_steamvr.json",
+        "/usr/share/openxr/1/openxr_steamvr_linux.json",
+        "/usr/share/openxr/1/openxr_steamvr64.json",
+        str(Path.home() / '.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json'),
+        str(Path.home() / '.local/share/Steam/steamapps/common/SteamVR/steamxr_linux64.json'),
+    ]
+    for p in candidates:
+        try:
+            if Path(p).exists():
+                return p
+        except Exception:
+            pass
+    return ""
+
+
+def stop_xrizer() -> tuple[bool, str]:
+    # Best-effort: stop XRizer processes so SteamVR can run cleanly.
+    # We only kill user processes; no sudo required.
+    try:
+        r = subprocess.run(['pkill','-f','/opt/xrizer'], capture_output=True, text=True)
+        if r.returncode == 0:
+            return True, 'XRizer stopped'
+        # rc=1 means no processes matched
+        return True, 'XRizer not running'
+    except FileNotFoundError:
+        return False, 'pkill not found'
+    except Exception as e:
+        return False, str(e)
+
+# --- OpenVR runtime switching (SteamVR <-> XRizer) ---
+
+def detect_steamvr_root() -> str | None:
+    candidates = [
+        os.path.expanduser("~/.steam/steam/steamapps/common/SteamVR"),
+        os.path.expanduser("~/.local/share/Steam/steamapps/common/SteamVR"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return None
+
+def detect_vrpathreg() -> str | None:
+    # vrpathreg ships with SteamVR
+    roots = [detect_steamvr_root()]
+    roots = [r for r in roots if r]
+    for root in roots:
+        cand = os.path.join(root, "bin", "linux64", "vrpathreg")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    # fallback if it's already in PATH
+    return shutil.which("vrpathreg")
+
+def set_openvr_runtime(runtime_dir: str) -> tuple[bool, str]:
+    vrpathreg = detect_vrpathreg()
+    if not vrpathreg:
+        return False, "vrpathreg not found (SteamVR not installed?)"
+
+    try:
+        r = subprocess.run([vrpathreg, "setruntime", runtime_dir], capture_output=True, text=True)
+        ok = (r.returncode == 0)
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        blob = "\n".join([x for x in [out, err] if x])
+        if ok:
+            return True, f"OpenVR runtime set to: {runtime_dir}"
+        return False, f"Failed to set OpenVR runtime: {blob or 'unknown error'}"
+    except Exception as e:
+        return False, f"Failed to set OpenVR runtime: {e}"
+
+def ensure_openvr_xrizer_enabled() -> tuple[bool, str]:
+    if os.path.isdir("/opt/xrizer"):
+        return set_openvr_runtime("/opt/xrizer")
+    return False, "XRizer not installed (/opt/xrizer missing)"
+
+def ensure_openvr_steamvr_enabled() -> tuple[bool, str]:
+    root = detect_steamvr_root()
+    if root:
+        return set_openvr_runtime(root)
+    return False, "SteamVR runtime folder not found"
 
 def cmd_display_name(cmd: str, fallback: str) -> str:
     # Friendly name for a command: basename of first token.
@@ -355,8 +467,130 @@ class VRControlApp(Gtk.Window):
         except Exception:
             pass
 
+    # ---------------------------------------------------------------------
+    # Logging / helpers (best-effort; never crash the GUI)
+    # ---------------------------------------------------------------------
+    def debug_log(self, msg: str):
+        try:
+            if hasattr(self, "debug_buffer") and self.debug_buffer is not None:
+                end = self.debug_buffer.get_end_iter()
+                self.debug_buffer.insert(end, msg + "\n")
+            else:
+                print(msg)
+        except Exception:
+            try:
+                print(msg)
+            except Exception:
+                pass
 
-    # ------------- Quick controls (always visible) -------------
+    def find_steamvr_openxr_json(self) -> str:
+        """Locate SteamVR's OpenXR runtime JSON (steamxr_linux64.json)."""
+        candidates = []
+        home = os.path.expanduser("~")
+        candidates += [
+            os.path.join(home, ".steam/steam/steamapps/common/SteamVR/steamxr_linux64.json"),
+            os.path.join(home, ".local/share/Steam/steamapps/common/SteamVR/steamxr_linux64.json"),
+            os.path.join(home, ".steam/root/steamapps/common/SteamVR/steamxr_linux64.json"),
+        ]
+
+        vdf_paths = [
+            os.path.join(home, ".steam/steam/steamapps/libraryfolders.vdf"),
+            os.path.join(home, ".local/share/Steam/steamapps/libraryfolders.vdf"),
+            os.path.join(home, ".steam/root/steamapps/libraryfolders.vdf"),
+        ]
+        for vdf in vdf_paths:
+            try:
+                if not os.path.exists(vdf):
+                    continue
+                data = open(vdf, "r", errors="ignore").read()
+                for p in re.findall(r'"path"\s+"([^"]+)"', data):
+                    p = p.replace('\\\\', '\\')
+                    candidates.append(os.path.join(p, "steamapps/common/SteamVR/steamxr_linux64.json"))
+                for p in re.findall(r'"\\d+"\s+"([^"]+)"', data):
+                    if "/" in p or "\\\\" in p:
+                        p = p.replace('\\\\', '\\')
+                        candidates.append(os.path.join(p, "steamapps/common/SteamVR/steamxr_linux64.json"))
+            except Exception:
+                pass
+
+        for c in candidates:
+            try:
+                if c and os.path.isfile(c):
+                    return c
+            except Exception:
+                pass
+        return ""
+
+
+
+    def update_detected_paths(self):
+        """Update detected path fields + status badges."""
+        try:
+            # Active OpenXR runtime (resolved symlink/target)
+            active = Path("~/.config/openxr/1/active_runtime.json").expanduser()
+            active_txt = str(active.resolve()) if active.exists() else ""
+
+            # WiVRn OpenXR JSON (system)
+            wivrn_json = Path("/usr/share/openxr/1/openxr_wivrn.json")
+            wivrn_txt = str(wivrn_json) if wivrn_json.exists() else ""
+
+            # SteamVR OpenXR JSON (auto-detect + override)
+            steamvr_openxr = self.cfg.get("override_steamvr_openxr_json") or self.find_steamvr_openxr_json()
+            steamvr_openxr_txt = steamvr_openxr or ""
+
+            # SteamVR root (derive from SteamVR OpenXR json if possible + override)
+            steamvr_root = self.cfg.get("override_steamvr_root")
+            if not steamvr_root and steamvr_openxr_txt:
+                try:
+                    steamvr_root = str(Path(steamvr_openxr_txt).expanduser().parent)
+                except Exception:
+                    steamvr_root = ""
+            steamvr_root_txt = steamvr_root or ""
+
+            # XRizer root (override or /opt/xrizer if present)
+            xrizer_root = self.cfg.get("override_xrizer_root") or ("/opt/xrizer" if Path("/opt/xrizer").is_dir() else "")
+            xrizer_txt = xrizer_root or ""
+
+            # openvrpaths.vrpath (canonical + common Steam locations + override)
+            openvrpaths = self.cfg.get("override_openvrpaths")
+            if not openvrpaths:
+                candidates = [
+                    Path("~/.config/openvr/openvrpaths.vrpath").expanduser(),
+                    Path("~/.local/share/Steam/config/openvrpaths.vrpath").expanduser(),
+                    Path("~/.steam/steam/config/openvrpaths.vrpath").expanduser(),
+                    Path("~/.steam/root/config/openvrpaths.vrpath").expanduser(),
+                ]
+                # Prefer real files first
+                for c in candidates:
+                    if c.is_file():
+                        openvrpaths = str(c)
+                        break
+                # If we only have a symlink (even dangling), show it so the user can repair it
+                if not openvrpaths:
+                    for c in candidates:
+                        if c.is_symlink():
+                            openvrpaths = str(c)
+                            break
+            openvrpaths_txt = openvrpaths or ""
+
+            # Write entries
+            self.entry_path_openxr_active.set_text(active_txt)
+            self.entry_path_openxr_wivrn.set_text(wivrn_txt)
+            self.entry_path_openxr_steamvr.set_text(steamvr_openxr_txt)
+            self.entry_path_steamvr_root.set_text(steamvr_root_txt)
+            self.entry_path_xrizer.set_text(xrizer_txt)
+            self.entry_path_openvrpaths.set_text(openvrpaths_txt)
+
+            # Status badges (✔ / ⚠ / ❌)
+            self.lbl_path_openxr_active.set_text(self._status_for_path(active_txt, "file"))
+            self.lbl_path_openxr_wivrn.set_text(self._status_for_path(wivrn_txt, "file"))
+            self.lbl_path_openxr_steamvr.set_text(self._status_for_path(steamvr_openxr_txt, "file"))
+            self.lbl_path_steamvr_root.set_text(self._status_for_path(steamvr_root_txt, "dir"))
+            self.lbl_path_xrizer.set_text(self._status_for_path(xrizer_txt, "dir"))
+            self.lbl_path_openvrpaths.set_text(self._status_for_path(openvrpaths_txt, "file"))
+
+        except Exception as e:
+            self.debug_log("update_detected_paths failed: " + repr(e))
     def build_quick_controls(self):
         _toggle = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         _toggle.set_margin_bottom(4)
@@ -382,6 +616,28 @@ class VRControlApp(Gtk.Window):
         self.btn_quick_autostart.set_tooltip_text("Start VR stack automatically when this control panel opens (not on boot)")
         self.btn_quick_autostart.connect("toggled", lambda *_: self.on_quick_autostart_toggled())
         _toggle.pack_start(self.btn_quick_autostart, False, False, 0)
+
+
+        _toggle.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
+
+        rt_lbl = Gtk.Label(xalign=0)
+        rt_lbl.set_markup("<b>XR Runtime</b>")
+        _toggle.pack_start(rt_lbl, False, False, 0)
+
+        self.combo_runtime = Gtk.ComboBoxText()
+        self.combo_runtime.append("wivrn", "WiVRn")
+        self.combo_runtime.append("steamvr", "SteamVR")
+        _toggle.pack_start(self.combo_runtime, False, False, 0)
+
+        cur = (self.cfg.get("xr_runtime", "wivrn") or "wivrn").strip().lower()
+        # If config was edited manually, infer from openxr_json too
+        oj = (self.cfg.get("openxr_json") or "").lower()
+        if "steamvr" in oj:
+            cur = "steamvr"
+        if cur not in ("wivrn", "steamvr"):
+            cur = "wivrn"
+        self.combo_runtime.set_active_id(cur)
+        self.combo_runtime.connect("changed", lambda *_: self.on_runtime_changed())
 
         # Beginner-friendly hint
         hint = Gtk.Label(xalign=0)
@@ -409,6 +665,14 @@ class VRControlApp(Gtk.Window):
             self.btn_quick_stop.set_sensitive(False)
 
     def on_quick_start(self):
+        # Ensure OpenXR runtime matches config
+        try:
+            oj = (self.cfg.get("openxr_json") or "").strip()
+            if oj:
+                apply_openxr_runtime(oj)
+        except Exception:
+            pass
+
         # systemctl_user() returns (rc:int, combined_output:str)
         rc, out = systemctl_user("start", STACK_SERVICE)
         if rc == 0:
@@ -446,6 +710,63 @@ class VRControlApp(Gtk.Window):
         else:
             self.toast('Autostart on open disabled')
         self.refresh_status()
+
+
+    def on_runtime_changed(self):
+        try:
+            choice = self.combo_runtime.get_active_id() or "wivrn"
+        except Exception:
+            choice = "wivrn"
+        choice = (choice or "wivrn").strip().lower()
+
+        if choice == "steamvr":
+            steam_json = (self.cfg.get("override_steamvr_openxr_json") or "").strip() or detect_steamvr_openxr_json()
+            if not steam_json:
+                self.toast("SteamVR OpenXR runtime JSON not found. Install SteamVR first.")
+                try:
+                    self.combo_runtime.set_active_id("wivrn")
+                except Exception:
+                    pass
+                return
+            self.cfg["xr_runtime"] = "steamvr"
+            self.cfg["openxr_json"] = steam_json
+            ok, msg = apply_openxr_runtime(steam_json)
+            # Stop XRizer if present (it can hijack SteamVR startup)
+            sx_ok, sx_msg = stop_xrizer()
+            ov_ok, ov_msg = ensure_openvr_steamvr_enabled()
+            if ok:
+                self.toast(f"OpenXR runtime set to SteamVR. {sx_msg} (OpenVR: {ov_msg})")
+            else:
+                self.toast(f"Failed to set SteamVR runtime: {msg}")
+                return
+        else:
+            wivrn_json = "/usr/share/openxr/1/openxr_wivrn.json"
+            self.cfg["xr_runtime"] = "wivrn"
+            self.cfg["openxr_json"] = wivrn_json
+            ok, msg = apply_openxr_runtime(wivrn_json)
+            ov_ok, ov_msg = ensure_openvr_xrizer_enabled()
+            if ok:
+                self.toast(f"OpenXR runtime set to WiVRn (OpenVR: {ov_msg})")
+            else:
+                self.toast(f"Failed to set WiVRn runtime: {msg}")
+                return
+        try:
+            cfg_save(self.cfg)
+        except Exception as e:
+            self.toast(f"Failed to save config: {e}")
+            return
+
+        # Reload from disk to ensure the selection sticks
+        try:
+            self.cfg = cfg_load()
+            cur = (self.cfg.get('xr_runtime', 'wivrn') or 'wivrn').strip().lower()
+            if cur not in ('wivrn','steamvr'):
+                cur = 'wivrn'
+            # keep UI consistent
+            self.combo_runtime.set_active_id(cur)
+        except Exception:
+            pass
+
 
     # ---------------- Status ----------------
     def build_status_view(self):
@@ -618,7 +939,13 @@ class VRControlApp(Gtk.Window):
         self.entry_server_pgrep.set_text(self.cfg["server_pgrep"])
         self.entry_vr_pgrep.set_text(self.cfg["vr_pgrep"])
 
+        # Tracking ON/OFF
+        self.switch_tracking_enabled = Gtk.Switch()
+        self.switch_tracking_enabled.set_active(str(self.cfg.get('tracking_enabled','true')).lower() in ('1','true','yes','on'))
+
         r = 0
+        r = self._grid_row_switch(grid, r, "Tracking enabled", self.switch_tracking_enabled,
+                                 "Turn OFF to start the stack without tracking software (e.g. no full-body tracking).")
         r = self._grid_entry(grid, r, "Tracking command", self.entry_tracking_cmd,
                              "Started first. Your tracking software (binary, script, or AppImage).")
         r = self._grid_entry(grid, r, "Tracking ready pattern", self.entry_tracking_ready,
@@ -651,14 +978,82 @@ class VRControlApp(Gtk.Window):
         help_block = Gtk.Label(xalign=0)
         help_block.set_line_wrap(True)
         help_block.set_text(
-            "Why this matters: these commands are exactly what your start script / systemd service launches. "
+            "Why this matters: these settings are exactly what your start script / systemd service launches. "
             "If a command is wrong, the stack will fail or start the wrong thing. The pgrep patterns prevent duplicate launches."
         )
         box.pack_start(help_block, False, False, 0)
 
+        # Detected runtime / helper paths (read-only)
+        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 6)
+
+        box.pack_start(self.section_header("Detected paths"), False, False, 0)
+        dgrid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        box.pack_start(dgrid, False, False, 0)
+
+        # Entry widgets
+        # Active runtime and WiVRn are informational (read-only). Others are editable overrides (type or Browse…).
+        self.entry_path_openxr_active = Gtk.Entry(); self._make_ro(self.entry_path_openxr_active)
+        self.entry_path_openxr_wivrn  = Gtk.Entry(); self._make_ro(self.entry_path_openxr_wivrn)
+
+        self.entry_path_openxr_steamvr = Gtk.Entry()
+        self.entry_path_steamvr_root = Gtk.Entry()
+        self.entry_path_xrizer = Gtk.Entry()
+        self.entry_path_openvrpaths = Gtk.Entry()
+
+        # Allow typing overrides directly
+        self._bind_entry_override(self.entry_path_openxr_steamvr, "override_steamvr_openxr_json")
+        self._bind_entry_override(self.entry_path_steamvr_root, "override_steamvr_root")
+        self._bind_entry_override(self.entry_path_xrizer, "override_xrizer_root")
+        self._bind_entry_override(self.entry_path_openvrpaths, "override_openvrpaths")
+
+        # Status labels
+        self.lbl_path_openxr_active = Gtk.Label(xalign=0)
+        self.lbl_path_openxr_wivrn = Gtk.Label(xalign=0)
+        self.lbl_path_openxr_steamvr = Gtk.Label(xalign=0)
+        self.lbl_path_steamvr_root = Gtk.Label(xalign=0)
+        self.lbl_path_xrizer = Gtk.Label(xalign=0)
+        self.lbl_path_openvrpaths = Gtk.Label(xalign=0)
+
+        dr = 0
+        dr = self._grid_path(dgrid, dr, "Active OpenXR runtime", self.entry_path_openxr_active, self.lbl_path_openxr_active, None,
+                             "Resolved target of ~/.config/openxr/1/active_runtime.json")
+        dr = self._grid_path(dgrid, dr, "WiVRn OpenXR JSON", self.entry_path_openxr_wivrn, self.lbl_path_openxr_wivrn, None,
+                             "/usr/share/openxr/1/openxr_wivrn.json")
+        dr = self._grid_path(dgrid, dr, "SteamVR OpenXR JSON", self.entry_path_openxr_steamvr, self.lbl_path_openxr_steamvr,
+                             ("file","override_steamvr_openxr_json"),
+                             "SteamVR OpenXR runtime file (steamxr_linux64.json)")
+        dr = self._grid_path(dgrid, dr, "SteamVR OpenVR root", self.entry_path_steamvr_root, self.lbl_path_steamvr_root,
+                             ("dir","override_steamvr_root"),
+                             "SteamVR runtime directory (contains bin/ and drivers/)")
+        dr = self._grid_path(dgrid, dr, "XRizer root", self.entry_path_xrizer, self.lbl_path_xrizer,
+                             ("dir","override_xrizer_root"),
+                             "OpenVR→OpenXR bridge directory (used only when enabled)")
+        dr = self._grid_path(dgrid, dr, "openvrpaths.vrpath", self.entry_path_openvrpaths, self.lbl_path_openvrpaths,
+                             ("file","override_openvrpaths"),
+                             "OpenVR paths file (Steam config).")
+
+        btn_row2 = Gtk.Box(spacing=10)
+
+        btn_paths = Gtk.Button(label="Refresh detected paths")
+        btn_paths.connect("clicked", lambda *_: self.update_detected_paths())
+
+        btn_repair = Gtk.Button(label="Repair openvrpaths.vrpath")
+        btn_repair.set_tooltip_text("Recreate ~/.config/openvr/openvrpaths.vrpath and symlink Steam config files to it.")
+        btn_repair.connect("clicked", lambda *_: self.repair_openvrpaths())
+
+        btn_row2.pack_start(btn_paths, False, False, 0)
+        btn_row2.pack_start(btn_repair, False, False, 0)
+        box.pack_start(btn_row2, False, False, 0)
+
+        # Fill on first open
+        self.update_detected_paths()
+
         return self.wrap_scroller(box)
 
     def on_save_settings(self):
+        self.cfg["tracking_enabled"] = 'true' if self.switch_tracking_enabled.get_active() else 'false'
+        # keep compatibility with the runner; we don't expose this in UI
+        self.cfg["tracking_stop_when_disabled"] = 'true'
         self.cfg["tracking_cmd"] = self.entry_tracking_cmd.get_text().strip()
         self.cfg["server_cmd"] = self.entry_server_cmd.get_text().strip()
         self.cfg["vr_cmd"] = self.entry_vr_cmd.get_text().strip()
@@ -1114,6 +1509,16 @@ class VRControlApp(Gtk.Window):
         grid.attach(l, 0, row, 1, 1)
         grid.attach(widget, 1, row, 1, 1)
 
+    def _grid_row_switch(self, grid, row, label, sw, why):
+        l = Gtk.Label(label=label, xalign=0)
+        grid.attach(l, 0, row, 1, 1)
+        grid.attach(sw, 1, row, 1, 1)
+        w = Gtk.Label(label=why, xalign=0)
+        w.set_line_wrap(True)
+        w.get_style_context().add_class("dim-label")
+        grid.attach(w, 2, row, 1, 1)
+        return row + 1
+
     def _grid_row_combo(self, grid, row, label, combo, why):
         l = Gtk.Label(label=label, xalign=0)
         grid.attach(l, 0, row, 1, 1)
@@ -1132,6 +1537,234 @@ class VRControlApp(Gtk.Window):
         w.set_line_wrap(True)
         w.get_style_context().add_class("dim-label")
         grid.attach(w, 2, row, 1, 1)
+        return row + 1
+
+
+    def _make_ro(self, entry: Gtk.Entry):
+        entry.set_editable(False)
+        entry.set_can_focus(True)
+
+    def _status_for_path(self, p: str, want: str) -> str:
+        # want: "file" or "dir"
+        if not p:
+            return "⚠"
+        try:
+            pp = Path(p).expanduser()
+            # Show warning for dangling symlink (common when Steam paths are linked to ~/.config/openvr then deleted)
+            if pp.is_symlink() and not pp.exists():
+                return "⚠"
+            if want == "dir":
+                return "✔" if pp.is_dir() else "❌"
+            return "✔" if pp.is_file() else "❌"
+        except Exception:
+            return "❌"
+
+    def save_config(self):
+        cfg_save(self.cfg)
+
+    def _bind_entry_override(self, entry: Gtk.Entry, cfg_key: str):
+        # Let users type overrides directly (in addition to Browse…)
+        try:
+            entry.set_placeholder_text("Leave blank to auto-detect")
+        except Exception:
+            pass
+
+        def _commit(*_args):
+            try:
+                val = (entry.get_text() or "").strip()
+                if val:
+                    self.cfg[cfg_key] = val
+                else:
+                    if cfg_key in self.cfg:
+                        del self.cfg[cfg_key]
+                self.save_config()
+                self.update_detected_paths()
+            except Exception as e:
+                self.debug_log(f"Failed to save override {cfg_key}: {e}")
+            return False
+
+        entry.connect("activate", _commit)
+        entry.connect("focus-out-event", _commit)
+    def repair_openvrpaths(self):
+        """Recreate ~/.config/openvr/openvrpaths.vrpath and point Steam to it.
+
+        This is intentionally safe:
+        - Never deletes user data (backs up existing real files).
+        - If no existing openvrpaths.vrpath can be found, it will try to *generate* a minimal one
+          using detected SteamVR install paths.
+        """
+        try:
+            home = Path.home()
+            canonical = home / ".config" / "openvr" / "openvrpaths.vrpath"
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+
+            steam_paths = [
+                home / ".steam" / "steam" / "config" / "openvrpaths.vrpath",
+                home / ".local" / "share" / "Steam" / "config" / "openvrpaths.vrpath",
+                home / ".steam" / "root" / "config" / "openvrpaths.vrpath",
+            ]
+
+            def _is_real_file(p: Path) -> bool:
+                try:
+                    return p.exists() and p.is_file() and (not p.is_symlink())
+                except Exception:
+                    return False
+
+            # 1) If canonical is missing, try to copy from any existing real file.
+            if not canonical.exists():
+                src = None
+                for sp in steam_paths:
+                    if _is_real_file(sp):
+                        src = sp
+                        break
+
+                # 2) If we only have symlinks, try following them to a real file.
+                if not src:
+                    for sp in steam_paths:
+                        try:
+                            if sp.is_symlink():
+                                tgt = sp.resolve(strict=False)
+                                if tgt.exists() and tgt.is_file():
+                                    src = tgt
+                                    break
+                        except Exception:
+                            pass
+
+                if src:
+                    try:
+                        canonical.write_bytes(src.read_bytes())
+                    except Exception:
+                        import shutil as _sh
+                        _sh.copy2(str(src), str(canonical))
+
+            # 3) Still missing? Generate a minimal openvrpaths.vrpath from detected SteamVR paths.
+            if not canonical.exists():
+                import json
+
+                steamvr_root = (self.cfg.get("override_steamvr_root") or "").strip()
+                if not steamvr_root:
+                    # Derive from SteamVR OpenXR JSON if we can
+                    sj = (self.cfg.get("override_steamvr_openxr_json") or self.find_steamvr_openxr_json() or "").strip()
+                    if sj:
+                        try:
+                            steamvr_root = str(Path(sj).expanduser().parent)
+                        except Exception:
+                            steamvr_root = ""
+
+                root = Path(steamvr_root).expanduser() if steamvr_root else None
+                if root and root.is_file():
+                    root = root.parent
+
+                steam_base = None
+                if root:
+                    # Try to find a parent that looks like a Steam install root (has steamapps/ and config/)
+                    for parent in [root] + list(root.parents):
+                        try:
+                            if (parent / "steamapps").is_dir() and (parent / "config").is_dir():
+                                steam_base = parent
+                                break
+                        except Exception:
+                            pass
+
+                # Fallback candidates
+                if steam_base is None:
+                    for cand in (
+                        home / ".steam" / "steam",
+                        home / ".local" / "share" / "Steam",
+                        home / ".steam" / "root",
+                    ):
+                        try:
+                            if (cand / "config").is_dir() or (cand / "steamapps").is_dir():
+                                steam_base = cand
+                                break
+                        except Exception:
+                            pass
+
+                if steam_base is not None and root is not None:
+                    cfg_dir = steam_base / "config"
+                    log_dir = steam_base / "logs"
+                    cfg_dir.mkdir(parents=True, exist_ok=True)
+                    log_dir.mkdir(parents=True, exist_ok=True)
+
+                    data = {
+                        "config": [str(cfg_dir)],
+                        "external_drivers": [],
+                        "jsonid": "vrpathreg",
+                        "log": [str(log_dir)],
+                        "runtime": [str(root)],
+                        "version": 1,
+                    }
+                    canonical.write_text(json.dumps(data, indent=2) + "\\n")
+            if not canonical.exists():
+                self.toast("openvrpaths.vrpath not found. Set SteamVR OpenVR root, or start SteamVR once, then click Repair again.")
+                return
+
+            # Set override to canonical so the UI reflects the canonical path.
+            self.cfg["override_openvrpaths"] = str(canonical)
+            self.save_config()
+
+            # Update Steam locations to symlink to canonical.
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            for sp in steam_paths:
+                try:
+                    sp.parent.mkdir(parents=True, exist_ok=True)
+                    if sp.is_symlink():
+                        try:
+                            sp.unlink()
+                        except Exception:
+                            pass
+                    elif sp.exists():
+                        backup = sp.with_suffix(sp.suffix + f".bak.{ts}")
+                        try:
+                            sp.rename(backup)
+                        except Exception:
+                            pass
+                    if sp.exists() or sp.is_symlink():
+                        try:
+                            sp.unlink()
+                        except Exception:
+                            pass
+                    sp.symlink_to(canonical)
+                except Exception as e:
+                    self.debug_log(f"repair_openvrpaths: failed for {sp}: {e}")
+
+            self.toast("Repaired openvrpaths.vrpath (canonical created + symlinks updated).")
+            self.update_detected_paths()
+        except Exception as e:
+            self.toast(f"Repair failed: {e}")
+
+    def _browse_override(self, kind: str, cfg_key: str):
+        # kind: "file" or "dir"
+        action = Gtk.FileChooserAction.OPEN if kind == "file" else Gtk.FileChooserAction.SELECT_FOLDER
+        dlg = Gtk.FileChooserDialog(
+            title="Select " + ("file" if kind == "file" else "folder"),
+            parent=self,
+            action=action
+        )
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        resp = dlg.run()
+        if resp == Gtk.ResponseType.OK:
+            chosen = dlg.get_filename()
+            if chosen:
+                self.cfg[cfg_key] = chosen
+                self.save_config()
+                self.update_detected_paths()
+        dlg.destroy()
+
+    def _grid_path(self, grid, row, label, entry, status_label, browse_tuple, why):
+        l = Gtk.Label(label=label, xalign=0)
+        grid.attach(l, 0, row, 1, 1)
+        grid.attach(entry, 1, row, 1, 1)
+        grid.attach(status_label, 2, row, 1, 1)
+        if browse_tuple:
+            kind, key = browse_tuple
+            b = Gtk.Button(label="Browse…")
+            b.connect("clicked", lambda *_: self._browse_override(kind, key))
+            grid.attach(b, 3, row, 1, 1)
+        w = Gtk.Label(label=why, xalign=0)
+        w.set_line_wrap(True)
+        w.get_style_context().add_class("dim-label")
+        grid.attach(w, 4, row, 1, 1)
         return row + 1
 
     def _combo_set(self, combo: Gtk.ComboBoxText, key: str):

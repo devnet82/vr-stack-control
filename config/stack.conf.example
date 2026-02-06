@@ -9,3 +9,17 @@ VR_CMD="wayvr"
 VR_PGREP="(^|/)(wayvr)(\s|$)"
 
 OPENXR_JSON="/usr/share/openxr/1/openxr_wivrn.json"
+
+# Enable/disable tracking backend (e.g. SlimeVR)
+tracking_enabled='true'
+
+# If tracking_enabled=false, should Stop Stack also stop tracking?
+tracking_stop_when_disabled='true'
+
+# OpenXR runtime JSON to use for the stack
+# WiVRn (Quest): /usr/share/openxr/1/openxr_wivrn.json
+# SteamVR:       /usr/share/openxr/1/openxr_steamvr.json
+openxr_json='/usr/share/openxr/1/openxr_wivrn.json'
+
+# Short name for the runtime selector in the GUI: wivrn | steamvr
+xr_runtime='wivrn'

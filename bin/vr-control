@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_VERSION="v0.6.21"
+APP_VERSION="v0.6.33"
 
 usage() {
   cat <<'USAGE'
-VR Stack Control v0.6.21
+VR Stack Control v0.6.33
 
 Usage:
   vr-control --gui            Open the GTK control panel (default)

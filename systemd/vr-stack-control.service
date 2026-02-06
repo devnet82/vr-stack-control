@@ -9,11 +9,8 @@ RemainAfterExit=yes
 # Start the stack in the correct order
 ExecStart=%h/.local/bin/vr-stack-run.sh start
 
-# Stop cleanly (no systemd escape warnings)
-# Note: keep these simple on purpose. Regex backslashes in unit files cause "unknown escape" warnings.
-ExecStop=-/usr/bin/pkill -f slimevr.jar
-ExecStop=-/usr/bin/pkill -x wivrn-server
-ExecStop=-/usr/bin/pkill -x wayvr
+# Stop cleanly using the same config/patterns
+ExecStop=%h/.local/bin/vr-stack-run.sh stop
 
 TimeoutStopSec=15
 
