@@ -5,13 +5,13 @@ This release replaces your old `vr-control --gui` YAD UI with a GTK GUI.
 ## Install
 
 ```bash
-pkill -9 -f "vr-control --gui" 2>/dev/null || true
-pkill -9 -f yad 2>/dev/null || true
-
 cd ~/Downloads
-unzip -o vr-stack-control-v0.6.68.zip
-cd vr-stack-control-v0.6.68
-bash install.sh
+rm -rf vr-stack-control-v0.6.85
+unzip -o vr-stack-control-v0.6.85.zip
+cd vr-stack-control-v0.6.85
+chmod +x install.sh uninstall.sh bin/*
+./install.sh
+systemctl --user daemon-reload
 ```
 
 ## Run
