@@ -1,4 +1,4 @@
-# VR Stack Control v0.6.76-openxrfix4
+# VR Stack Control v0.6.85
 
 This release replaces your old `vr-control --gui` YAD UI with a GTK GUI.
 
