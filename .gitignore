@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 bin/__pycache__/
 *.bak
+boot/
+dev/
+etc/
+home/
+lib/
+lib64/
+sbin/
