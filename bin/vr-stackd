@@ -1,0 +1,1476 @@
+#!/usr/bin/env python3
+"""VR Stack Control daemon (no shell runner).
+
+Implements the same behavior as vr-stack-run.sh, but inside the app so the
+service/GUI doesn't depend on a bash script.
+
+- Reads ~/.config/vr-stack/stack.conf
+- Sets OpenXR runtime (WiVRn or SteamVR) by writing ~/.config/openxr/1/active_runtime.json
+- Switches OpenVR runtime via vrpathreg (SteamVR <-> XRizer) when possible
+- Starts components in order: Tracking -> Server -> VR App
+- In WiVRn mode, monitors the VR app (vr_pgrep) and when it exits, stops the stack.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "vr-stack"
+STACK_CONF = CONFIG_DIR / "stack.conf"
+
+OPENXR_DIR = Path.home() / ".config" / "openxr" / "1"
+ACTIVE_OPENXR = OPENXR_DIR / "active_runtime.json"
+
+# Store generated runtime manifests in a user-writable location.
+# (Some users accidentally created ~/.config/openxr as root via sudo.)
+PRIVATE_OPENXR_DIR = Path.home() / ".local" / "share" / "vr-stack" / "openxr"
+
+LOG_FILE = Path.home() / ".local" / "share" / "vr-stack.log"  # legacy file log
+
+DEFAULTS: dict[str, str] = {
+    "tracking_name": "SlimeVR",
+    "server_name": "WiVRn",
+    "vr_name": "WayVR",
+    "tracking_enabled": "true",
+    "tracking_stop_when_disabled": "true",
+    # Prefer the launcher on PATH when installed via system package/AUR.
+    "tracking_cmd": "slimevr",
+    "tracking_ready": r"slimevr\.jar",
+    "server_cmd": "wivrn-server",
+    "server_pgrep": "wivrn-server",
+    "vr_cmd": "wayvr --openxr --show",
+    "vr_pgrep": r"(^|/)(wayvr)(\\s|$)",
+    "openxr_json": "",
+    "xr_runtime": "wivrn",  # wivrn | steamvr
+    "steamvr_launch": "steam steam://rungameid/250820",
+    "steamvr_autostart": "false",
+    # If true, vr-stackd will try to ensure Steam is started with the same
+    # OpenXR/OpenVR environment used by the stack (helps Steam/Proton VR).
+    # Note: if Steam is already running, Steam-launched games will inherit
+    # Steam's environment, not WayVR's.
+    "steam_manage": "false",
+    "steam_close_on_wivrn": "true",
+    "steamvr_close_on_wivrn": "true",
+    # If steam_manage=true and Steam is already running, attempt to shutdown and
+    # restart Steam so it picks up the required environment.
+    "steam_restart": "false",
+    # WiVRn: wait for headset connection before launching VR app
+    "wivrn_wait_for_client": "true",
+    # 0 = wait forever
+    "wivrn_wait_timeout_s": "0",
+    # Optional override: which process closes triggers cascade stop
+    "monitor_pgrep": "",
+}
+
+_STOP_REQUESTED = False
+
+
+def _strip_quotes(v: str) -> str:
+    v = v.strip()
+    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+        return v[1:-1]
+    return v
+
+
+def _is_true(v: str) -> bool:
+    return str(v).strip().lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+
+
+def _strip_quotes(s: str) -> str:
+    s = s.strip()
+    if (len(s) >= 2) and ((s[0] == s[-1]) and s[0] in ('"', "'")):
+        return s[1:-1]
+    return s
+
+
+def _normalize_bool_str(v: str) -> str:
+    return "true" if _is_true(v) else "false"
+
+
+def _find_wivrn_openxr_manifest() -> str | None:
+    """Return path to the WiVRn OpenXR runtime manifest if present."""
+    candidates = [
+        "/usr/share/openxr/1/openxr_wivrn.json",
+        "/etc/openxr/1/openxr_wivrn.json",
+        # fallback: older naming
+        "/usr/share/openxr/1/wivrn_runtime.json",
+        "/etc/openxr/1/wivrn_runtime.json",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _ensure_active_runtime_symlink(target_json: str) -> str:
+    """Ensure ~/.config/openxr/1/active_runtime.json points to target_json."""
+    cfg_dir = os.path.expanduser("~/.config/openxr/1")
+    os.makedirs(cfg_dir, exist_ok=True)
+    active = os.path.join(cfg_dir, "active_runtime.json")
+    try:
+        # Replace existing file/symlink
+        if os.path.islink(active) or os.path.exists(active):
+            os.unlink(active)
+        os.symlink(target_json, active)
+    except Exception:
+        # Non-fatal; caller will still export OPENXR_RUNTIME_JSON
+        pass
+    return active
+
+
+def _normalize_cfg(cfg: dict[str, str]) -> dict[str, str]:
+    """Normalize common keys (quotes, boolean strings) and auto-fix openxr_json when missing."""
+    # strip quotes from every value
+    for k in list(cfg.keys()):
+        cfg[k] = _strip_quotes(str(cfg[k]))
+
+    # normalize boolean-ish keys (keep as strings because the rest of the app expects strings)
+    for k in (
+        "tracking_enabled",
+        "tracking_stop_when_disabled",
+        "steam_manage",
+        "steamvr_autostart",
+    ):
+        if k in cfg:
+            cfg[k] = _normalize_bool_str(cfg[k])
+
+    # Auto-fix openxr_json if missing/bad
+    openxr_json = cfg.get("openxr_json", "").strip()
+    if (not openxr_json) or (not os.path.exists(openxr_json)):
+        found = _find_wivrn_openxr_manifest()
+        if found:
+            cfg["openxr_json"] = found
+        else:
+            # leave empty; downstream will log a clear error
+            cfg["openxr_json"] = openxr_json
+
+    return cfg
+
+
+def _expand_path(p: str) -> str:
+    return os.path.expandvars(os.path.expanduser((p or "").strip()))
+
+
+def _normalize_name_candidates(name: str) -> list[str]:
+    n = (name or "").strip()
+    if not n:
+        return []
+    lower = n.lower()
+    cands = [n, lower, lower.replace(" ", ""), lower.replace(" ", "-"), lower.replace(" ", "_")]
+    cands.append(re.sub(r"[^a-z0-9]+", "", lower))
+    out: list[str] = []
+    for c in cands:
+        c = c.strip()
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+def _clean_desktop_exec(exec_line: str) -> str:
+    if not exec_line:
+        return ""
+    try:
+        toks = shlex.split(exec_line)
+    except Exception:
+        toks = exec_line.split()
+    cleaned = []
+    for t in toks:
+        if t.startswith("%") and len(t) <= 3:
+            continue
+        if re.fullmatch(r"%[fFuUdDnNickvm]", t):
+            continue
+        cleaned.append(t)
+    s = " ".join(cleaned).strip()
+    s = re.sub(r"\s%[fFuUdDnNickvm]\b", "", s).strip()
+    return s
+
+
+def _detect_from_desktop(app_name: str) -> str:
+    name = (app_name or "").strip().lower()
+    if not name:
+        return ""
+    desktop_dirs = [Path.home() / ".local" / "share" / "applications", Path("/usr/share/applications")]
+    best_exec = ""
+    best_score = -1
+    for d in desktop_dirs:
+        if not d.exists():
+            continue
+        for p in d.glob("*.desktop"):
+            try:
+                raw = p.read_text(errors="ignore")
+            except Exception:
+                continue
+            dn = ""
+            de = ""
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip().lower()
+                if k == "name":
+                    dn = v.strip().lower()
+                elif k == "exec":
+                    de = v.strip()
+            if not de:
+                continue
+            dl = de.lower()
+            score = -1
+            if dn == name:
+                score = 100
+            elif name in dn:
+                score = 80
+            elif name in dl:
+                score = 60
+            for c in _normalize_name_candidates(app_name):
+                cl = c.lower()
+                if cl and dn and cl == dn:
+                    score = max(score, 95)
+                elif cl and dn and cl in dn:
+                    score = max(score, 85)
+                elif cl and dl and cl in dl:
+                    score = max(score, 65)
+            if score > best_score:
+                best_score = score
+                best_exec = de
+    return _clean_desktop_exec(best_exec) if best_score >= 0 else ""
+
+
+def _detect_from_running_process(app_name: str) -> str:
+    name = (app_name or "").strip()
+    if not name:
+        return ""
+    pat = re.escape(name)
+    try:
+        r = subprocess.run(["pgrep", "-af", pat], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+        out = (r.stdout or "").strip().splitlines()
+    except Exception:
+        out = []
+    for line in out:
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        cmd = parts[1].strip()
+        if "/tmp/.mount_" in cmd or "/tmp/appimage_extracted_" in cmd:
+            continue
+        return cmd
+    return ""
+
+
+def detect_command_by_name(app_name: str, *, kind: str | None = None) -> str:
+    n = (app_name or "").strip()
+    if not n:
+        return ""
+
+    # 1) PATH
+    for cand in _normalize_name_candidates(n):
+        p = shutil.which(cand)
+        if p:
+            return p
+
+    # 2) Desktop
+    d = _detect_from_desktop(n)
+    if d:
+        return d
+
+    # 3) Hints
+    nl = n.lower()
+    if kind == "tracking" or "slime" in nl:
+        if os.path.isfile("/usr/bin/slimevr"):
+            return "/usr/bin/slimevr"
+        if os.path.isfile("/opt/slimevr/slimevr"):
+            return "/opt/slimevr/slimevr"
+        if os.path.isfile("/usr/share/slimevr/slimevr.jar"):
+            return "java -Xmx128M -jar /usr/share/slimevr/slimevr.jar run"
+    if kind == "server" or "wivrn" in nl:
+        p = shutil.which("wivrn-server")
+        return p or "wivrn-server"
+    if kind == "vr" or "wayvr" in nl:
+        p = shutil.which("wayvr")
+        return p or "wayvr"
+
+    # 4) Running process
+    r = _detect_from_running_process(n)
+    if r:
+        return r
+
+    return ""
+
+
+def detect_slimevr_cmd() -> str:
+    return detect_command_by_name("SlimeVR", kind="tracking")
+
+
+def read_kv(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if not path.exists():
+        return data
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = _strip_quotes(v.strip())
+        data[k] = v
+    return data
+
+
+def load_cfg() -> dict[str, str]:
+    cfg = dict(DEFAULTS)
+    raw = read_kv(STACK_CONF)
+
+    # accept legacy uppercase keys too
+    mapping = {
+        "tracking_name": ["tracking_name", "TRACKING_NAME"],
+        "server_name": ["server_name", "SERVER_NAME"],
+        "vr_name": ["vr_name", "VR_NAME"],
+        "tracking_enabled": ["tracking_enabled", "TRACKING_ENABLED"],
+        "tracking_stop_when_disabled": ["tracking_stop_when_disabled", "TRACK_STOP_WHEN_DISABLED", "TRACKING_STOP_WHEN_DISABLED"],
+        "tracking_cmd": ["tracking_cmd", "TRACK_CMD", "TRACKING_CMD"],
+        "tracking_ready": ["tracking_ready", "TRACK_READY_PGREP", "TRACKING_READY"],
+        "server_cmd": ["server_cmd", "SERVER_CMD"],
+        "server_pgrep": ["server_pgrep", "SERVER_PGREP"],
+        "vr_cmd": ["vr_cmd", "VR_CMD"],
+        "vr_pgrep": ["vr_pgrep", "VR_PGREP"],
+        "openxr_json": ["openxr_json", "OPENXR_JSON"],
+        "xr_runtime": ["xr_runtime", "XR_RUNTIME"],
+        "steamvr_launch": ["steamvr_launch", "STEAMVR_LAUNCH"],
+        "steamvr_autostart": ["steamvr_autostart", "STEAMVR_AUTOSTART"],
+        "steam_manage": ["steam_manage", "STEAM_MANAGE"],
+        "steam_restart": ["steam_restart", "STEAM_RESTART"],
+        "wivrn_wait_for_client": ["wivrn_wait_for_client", "WIVRN_WAIT_FOR_CLIENT"],
+        "wivrn_wait_timeout_s": ["wivrn_wait_timeout_s", "WIVRN_WAIT_TIMEOUT_S"],
+        "monitor_pgrep": ["monitor_pgrep", "MONITOR_PGREP"],
+    }
+
+    for key, aliases in mapping.items():
+        for a in aliases:
+            if a in raw and raw[a] != "":
+                cfg[key] = raw[a]
+                break
+
+    # expand paths that should support ~/$HOME
+    cfg["tracking_cmd"] = _expand_path(cfg.get("tracking_cmd", ""))
+    cfg["openxr_json"] = _expand_path(cfg.get("openxr_json", ""))
+    # Auto-fix common config mistakes (bad openxr_json, duplicate/quoted booleans, etc.)
+    cfg = _normalize_cfg(cfg)
+
+    # If tracking_cmd is missing or points to a legacy path that doesn't exist, try to detect.
+    try:
+        tc = (cfg.get("tracking_cmd") or "").strip()
+        det = detect_slimevr_cmd()
+        if det:
+            if (not tc) or (tc == "/opt/slimevr/slimevr" and not os.path.exists(tc)):
+                cfg["tracking_cmd"] = det
+            elif tc.startswith("/") and not os.path.exists(tc) and det != tc:
+                cfg["tracking_cmd"] = det
+    except Exception:
+        pass
+
+
+    # Resolve commands from app names if the configured command is missing/invalid.
+    def _cmd_valid(cmd: str) -> bool:
+        c = (cmd or "").strip()
+        if not c:
+            return False
+        try:
+            tok = shlex.split(c)[0]
+        except Exception:
+            tok = c.split(" ", 1)[0]
+        if tok.startswith("/"):
+            return os.path.exists(tok) and os.access(tok, os.X_OK)
+        return shutil.which(tok) is not None
+
+    if not _cmd_valid(cfg.get("tracking_cmd","")):
+        nm = cfg.get("tracking_name","SlimeVR")
+        det = detect_command_by_name(nm, kind="tracking")
+        if det:
+            cfg["tracking_cmd"] = det
+
+    if not _cmd_valid(cfg.get("server_cmd","")):
+        nm = cfg.get("server_name","WiVRn")
+        det = detect_command_by_name(nm, kind="server")
+        if det:
+            cfg["server_cmd"] = det
+
+    if not _cmd_valid(cfg.get("vr_cmd","")):
+        nm = cfg.get("vr_name","WayVR")
+        det = detect_command_by_name(nm, kind="vr")
+        if det:
+            cfg["vr_cmd"] = det
+
+    return cfg
+
+
+def log(msg: str) -> None:
+    # Always print to stdout (journald under systemd)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    # Also append to a legacy log file for quick tailing
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def run(args: list[str], timeout: float | None = None) -> tuple[int, str]:
+    try:
+        r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "").strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def pgrep_any(pattern: str) -> bool:
+    try:
+        r = subprocess.run(["pgrep", "-af", pattern], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return r.returncode == 0
+    except Exception:
+        return False
+# Backwards compat: older builds used is_true()
+is_true = _is_true
+
+
+
+def pkill(pattern: str, sig: str | None = None, *, signal: str | None = None) -> None:
+    """Send a signal to processes matching a regex pattern via pkill."""
+    # Backward/forward compatibility: some call sites used signal=..., older ones used sig=...
+    if signal is not None:
+        sig = signal
+    if not sig:
+        sig = "TERM"
+    subprocess.run(["pkill", "-f", f"--signal={sig}", pattern], check=False)
+
+def wait_gone(pattern: str, timeout_s: float = 3.0) -> bool:
+    end = time.time() + timeout_s
+    while time.time() < end:
+        if not pgrep_any(pattern):
+            return True
+        time.sleep(0.2)
+    return not pgrep_any(pattern)
+
+
+def spawn_cmd(cmd: str, env: dict[str, str] | None = None, appimage_extract: bool = False) -> subprocess.Popen | None:
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return None
+
+    env2 = os.environ.copy()
+    if env:
+        env2.update(env)
+    if appimage_extract:
+        env2["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+
+    # Prefer argv execution; fall back to bash -lc if the command contains shell meta.
+    try:
+        argv = shlex.split(cmd)
+    except Exception:
+        argv = []
+
+    shell_meta = any(ch in cmd for ch in ["|", "&", ";", ">", "<", "`", "$(", "{", "}"])
+
+    try:
+        if argv and not shell_meta:
+            return subprocess.Popen(argv, env=env2)
+        return subprocess.Popen(["bash", "-lc", cmd], env=env2)
+    except Exception as e:
+        log(f"ERROR: failed to start: {cmd} :: {e}")
+        return None
+
+
+def ensure_openxr_dir() -> None:
+    OPENXR_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_private_openxr_dir() -> None:
+    PRIVATE_OPENXR_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(errors="ignore"))
+    except Exception:
+        return {}
+
+
+def ensure_wivrn_runtime_json() -> Path:
+    """Return a WiVRn runtime manifest path.
+
+    Prefer the system-provided manifest (this is what works when the user-level
+    active_runtime.json is missing), and fall back to generating a per-user
+    manifest only when necessary.
+    """
+    # Prefer system manifests if present
+    for c in (
+        Path('/usr/share/openxr/1/openxr_wivrn.json'),
+        Path('/etc/openxr/1/openxr_wivrn.json'),
+        Path('/usr/local/share/openxr/1/openxr_wivrn.json'),
+    ):
+        try:
+            if c.exists() and c.is_file():
+                return c
+        except Exception:
+            pass
+
+    # Fall back: create/refresh a per-user WiVRn runtime JSON with an absolute library_path.
+    ensure_private_openxr_dir()
+    out = PRIVATE_OPENXR_DIR / "wivrn_runtime.json"
+
+    # Candidate manifests
+    candidates = [
+        Path("/usr/share/openxr/1/openxr_wivrn.json"),
+        Path("/usr/local/share/openxr/1/openxr_wivrn.json"),
+        Path(_expand_path("~/.var/app/io.github.wivrn.wivrn/config/openxr/1/openxr_wivrn.json")),
+    ]
+
+    lib_path: str | None = None
+
+    for c in candidates:
+        if not c.exists():
+            continue
+        data = _read_json(c)
+        lib = (data.get("runtime") or {}).get("library_path")
+        if isinstance(lib, str) and lib.strip():
+            lib = lib.strip()
+            p = Path(lib)
+            if not p.is_absolute():
+                p = (c.parent / lib).resolve()
+            if p.exists():
+                lib_path = str(p)
+                break
+
+    if not lib_path:
+        # Fallbacks
+        for p in ["/usr/lib/wivrn/libopenxr_wivrn.so", "/usr/lib64/wivrn/libopenxr_wivrn.so"]:
+            if Path(p).exists():
+                lib_path = p
+                break
+
+    if not lib_path:
+        # Keep a best-effort default (may still fail, but gives a clear error later)
+        lib_path = "/usr/lib/wivrn/libopenxr_wivrn.so"
+
+    payload = {
+        "file_format_version": "1.0.0",
+        "runtime": {"name": "WiVRn", "library_path": lib_path},
+    }
+
+    try:
+        out.write_text(json.dumps(payload, indent=2) + "\n")
+    except Exception:
+        pass
+
+    return out
+
+
+def _parse_vdf_library_paths(vdf_text: str) -> list[str]:
+    paths: list[str] = []
+    # modern libraryfolders.vdf has "path" "..."
+    for p in re.findall(r'"path"\s+"([^"]+)"', vdf_text):
+        paths.append(p.replace('\\\\', '\\'))
+    # older style can contain "1" "..."
+    for p in re.findall(r'"\\d+"\s+"([^"]+)"', vdf_text):
+        if "/" in p or "\\" in p:
+            paths.append(p.replace('\\\\', '\\'))
+    return paths
+
+
+def detect_steamvr_root() -> Path | None:
+    home = Path.home()
+
+    direct = [
+        home / ".local/share/Steam/steamapps/common/SteamVR",
+        home / ".steam/steam/steamapps/common/SteamVR",
+        home / ".steam/root/steamapps/common/SteamVR",
+        home / ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/SteamVR",  # Flatpak Steam
+    ]
+    for r in direct:
+        if (r / "bin/linux64/vrclient.so").exists():
+            return r
+
+    vdfs = [
+        home / ".local/share/Steam/steamapps/libraryfolders.vdf",
+        home / ".steam/steam/steamapps/libraryfolders.vdf",
+        home / ".steam/root/steamapps/libraryfolders.vdf",
+        home / ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf",
+    ]
+
+    for vdf in vdfs:
+        try:
+            if not vdf.exists():
+                continue
+            txt = vdf.read_text(errors="ignore")
+            for lib in _parse_vdf_library_paths(txt):
+                cand = Path(lib) / "steamapps/common/SteamVR"
+                if (cand / "bin/linux64/vrclient.so").exists():
+                    return cand
+        except Exception:
+            pass
+
+    return None
+
+
+def ensure_steamvr_runtime_json(root: Path) -> Path | None:
+    """Create a per-user SteamVR OpenXR runtime JSON with absolute vrclient.so."""
+    ensure_private_openxr_dir()
+    out = PRIVATE_OPENXR_DIR / "steamvr_runtime.json"
+    lib = root / "bin/linux64/vrclient.so"
+    if not lib.exists():
+        return None
+    payload = {
+        "file_format_version": "1.0.0",
+        "runtime": {
+            "name": "SteamVR",
+            "library_path": str(lib),
+            "VALVE_runtime_is_steamvr": True,
+        },
+    }
+    try:
+        out.write_text(json.dumps(payload, indent=2) + "\n")
+        return out
+    except Exception:
+        return None
+
+
+def set_active_openxr(json_path: Path) -> bool:
+    """Write ~/.config/openxr/1/active_runtime.json.
+
+    Returns True on success. If the file is (or was) a symlink created earlier,
+    we unlink it first so we don't follow it into a root-owned target.
+    """
+    try:
+        ensure_openxr_dir()
+    except Exception as e:
+        log(f"ERROR: failed to create OpenXR dir {OPENXR_DIR}: {e}")
+        return False
+
+    try:
+        # If active_runtime.json is a symlink (common when previously set with sudo),
+        # writing would follow it and can hit EACCES. Unlink first.
+        if ACTIVE_OPENXR.is_symlink():
+            ACTIVE_OPENXR.unlink(missing_ok=True)
+
+        # If it exists but isn't writable, try to remove and recreate.
+        if ACTIVE_OPENXR.exists() and not os.access(ACTIVE_OPENXR, os.W_OK):
+            try:
+                ACTIVE_OPENXR.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # Use a real file (not a symlink) for compatibility with OpenXR loaders.
+        # Normalize relative runtime.library_path to an absolute path so copying a system
+        # manifest into ~/.config/openxr/1 doesn't break WiVRn/SteamVR.
+        try:
+            import json as _json
+            payload = _json.loads(json_path.read_text(errors="ignore") or "{}")
+            rt = payload.get("runtime") or {}
+            lib = rt.get("library_path")
+            if isinstance(lib, str) and lib and not lib.startswith("/"):
+                abs_lib = (json_path.parent / lib).resolve()
+                rt["library_path"] = str(abs_lib)
+                payload["runtime"] = rt
+            ACTIVE_OPENXR.write_text(_json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            ACTIVE_OPENXR.write_text(json_path.read_text(errors="ignore"))
+        return True
+
+    except PermissionError as e:
+        log(f"ERROR: failed to set OpenXR runtime: {e}")
+        log("FIX: your ~/.config/openxr folder is likely owned by root from an earlier sudo.")
+        log("FIX: run: sudo chown -R $USER:$USER ~/.config/openxr && rm -f ~/.config/openxr/1/active_runtime.json")
+        return False
+
+    except Exception as e:
+        log(f"ERROR: failed to set OpenXR runtime: {e}")
+        return False
+
+
+def ensure_wivrn_runtime_alias(target_json: Path) -> None:
+    """Create ~/.config/openxr/1/wivrn_runtime.json as a compatibility alias.
+
+    Some stacks (and some versions of XRizer/Proton) end up looking for this
+    specific filename. Keeping it in sync with active_runtime.json prevents
+    OpenXR loader failures like:
+      failed to open /home/<user>/.config/openxr/1/wivrn_runtime.json
+    """
+    try:
+        # Ensure ~/.config/openxr/1 exists.
+        # (Bugfix: previously called a non-existent helper, so the alias was
+        # never created.)
+        ensure_openxr_dir()
+        alias = CONFIG_OPENXR_DIR / "wivrn_runtime.json"
+        # Prefer a symlink (cheap + always up to date). If that fails (weird FS),
+        # fall back to copying the json file.
+        try:
+            safe_write_symlink(alias, target_json)
+        except Exception:
+            alias.write_text(target_json.read_text())
+    except Exception:
+        # Best-effort only; failure here should not stop the stack.
+        pass
+
+
+
+def detect_vrpathreg(steamvr_root: Path | None) -> str | None:
+    if steamvr_root:
+        cand = steamvr_root / "bin/linux64/vrpathreg"
+        if cand.exists() and os.access(cand, os.X_OK):
+            return str(cand)
+    # PATH fallback
+    from shutil import which
+
+    return which("vrpathreg")
+
+
+def set_openvr_runtime(runtime_dir: str, steamvr_root: Path | None) -> None:
+    vrpathreg = detect_vrpathreg(steamvr_root)
+    if not vrpathreg:
+        return
+    try:
+        subprocess.run([vrpathreg, "setruntime", runtime_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+
+
+def fix_openvrpaths(prefer: str, steamvr_root: Path | None) -> None:
+    """Keep OpenVR paths stable across SteamVR<->WiVRn switches.
+
+    prefer:
+      - 'xrizer'  -> ensure /opt/xrizer is first in runtime list
+      - 'steamvr' -> ensure steamvr_root is first in runtime list (if set)
+
+    We only manage the user OpenVR paths file:
+      ~/.local/share/openvr/openvrpaths.vrpath (canonical)
+      ~/.config/openvr/openvrpaths.vrpath -> symlink to canonical
+    """
+    try:
+        home = Path.home()
+        canonical = home / '.local' / 'share' / 'openvr' / 'openvrpaths.vrpath'
+        legacy = home / '.config' / 'openvr' / 'openvrpaths.vrpath'
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        # Break symlink loops (ELOOP / "Too many levels of symbolic links").
+        # The canonical file MUST be a real file, never a symlink.
+        # If we detect symlinks here, remove them and rebuild cleanly below.
+        for p in (canonical, legacy):
+            try:
+                if p.is_symlink():
+                    p.unlink()
+            except Exception:
+                pass
+
+        # If legacy is a real file and canonical missing, copy it
+        if (not canonical.exists()) and legacy.exists() and legacy.is_file() and (not legacy.is_symlink()):
+            try:
+                canonical.write_bytes(legacy.read_bytes())
+            except Exception:
+                import shutil
+                shutil.copy2(str(legacy), str(canonical))
+
+        # Ensure legacy points to canonical
+        if canonical.exists():
+            if legacy.exists() and (not legacy.is_symlink()):
+                ts = time.strftime('%Y%m%d-%H%M%S')
+                try:
+                    legacy.rename(legacy.with_suffix(legacy.suffix + f'.bak.{ts}'))
+                except Exception:
+                    pass
+            try:
+                if legacy.is_symlink() or legacy.exists():
+                    legacy.unlink()
+            except Exception:
+                pass
+            try:
+                legacy.symlink_to(canonical)
+            except Exception:
+                pass
+
+        if not canonical.exists():
+            # Generate a minimal, valid openvrpaths.vrpath if nothing exists yet.
+            # This is critical on fresh installs where Steam has never created one.
+            try:
+                import json
+                cfg_candidates = [
+                    home / '.local' / 'share' / 'Steam' / 'config',
+                    home / '.steam' / 'steam' / 'config',
+                    home / '.steam' / 'root' / 'config',
+                ]
+                log_candidates = [
+                    home / '.local' / 'share' / 'Steam' / 'logs',
+                    home / '.steam' / 'steam' / 'logs',
+                    home / '.steam' / 'root' / 'logs',
+                ]
+                cfg_dir = next((c for c in cfg_candidates if c.is_dir()), None)
+                log_dir = next((c for c in log_candidates if c.is_dir()), None)
+
+                runtimes: list[str] = []
+                if Path('/opt/xrizer').is_dir():
+                    runtimes.append('/opt/xrizer')
+
+                if steamvr_root is not None and steamvr_root.is_dir():
+                    runtimes.append(str(steamvr_root))
+                else:
+                    for cand in [
+                        home / '.local' / 'share' / 'Steam' / 'steamapps' / 'common' / 'SteamVR',
+                        home / '.steam' / 'steam' / 'steamapps' / 'common' / 'SteamVR',
+                        home / '.steam' / 'root' / 'steamapps' / 'common' / 'SteamVR',
+                    ]:
+                        try:
+                            if cand.is_dir():
+                                runtimes.append(str(cand))
+                        except Exception:
+                            pass
+
+                seen = set()
+                runtimes = [r for r in runtimes if not (r in seen or seen.add(r))]
+
+                data0 = {
+                    'config': [str(cfg_dir)] if cfg_dir else [],
+                    'external_drivers': None,
+                    'jsonid': 'vrpathreg',
+                    'log': [str(log_dir)] if log_dir else [],
+                    'runtime': runtimes,
+                    'version': 1,
+                }
+                canonical.write_text(json.dumps(data0, indent=4) + "\n", encoding='utf-8')
+            except Exception:
+                pass
+
+        if not canonical.exists():
+            return
+
+        import json
+        try:
+            data = json.loads(canonical.read_text(encoding='utf-8'))
+        except Exception:
+            return
+
+        rt = list(data.get('runtime') or [])
+        seen = set()
+        rt = [x for x in rt if not (x in seen or seen.add(x))]
+
+        if prefer == 'xrizer' and Path('/opt/xrizer').is_dir():
+            xr = '/opt/xrizer'
+            rt = [x for x in rt if x != xr]
+            rt.insert(0, xr)
+        elif prefer == 'steamvr' and steamvr_root is not None:
+            sr = str(steamvr_root)
+            rt = [x for x in rt if x != sr]
+            rt.insert(0, sr)
+
+        data['runtime'] = rt
+        canonical.write_text(json.dumps(data, indent=4) + "\n", encoding='utf-8')
+
+        # Also normalize Steam's own openvrpaths.vrpath copies (Steam/Pressure-Vessel can use these).
+        try:
+            steam_paths = [
+                home / '.steam' / 'steam' / 'config' / 'openvrpaths.vrpath',
+                home / '.local' / 'share' / 'Steam' / 'config' / 'openvrpaths.vrpath',
+                home / '.steam' / 'root' / 'config' / 'openvrpaths.vrpath',
+            ]
+            for sp in steam_paths:
+                try:
+                    if not sp.exists() or (not sp.is_file()):
+                        continue
+                    sdata = json.loads(sp.read_text(encoding='utf-8'))
+                    srt = list(sdata.get('runtime') or [])
+                    seen2 = set()
+                    srt = [x for x in srt if not (x in seen2 or seen2.add(x))]
+                    if prefer == 'xrizer' and Path('/opt/xrizer').is_dir():
+                        xr = '/opt/xrizer'
+                        srt = [x for x in srt if x != xr]
+                        srt.insert(0, xr)
+                    elif prefer == 'steamvr' and steamvr_root is not None:
+                        sr = str(steamvr_root)
+                        srt = [x for x in srt if x != sr]
+                        srt.insert(0, sr)
+                    sdata['runtime'] = srt
+                    sp.write_text(json.dumps(sdata, indent=4) + "\n", encoding='utf-8')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        return
+
+def stop_steamvr_processes() -> None:
+    for pat in ["vrcompositor", "vrserver", "vrmonitor", "vrwebhelper", "steamvr"]:
+        pkill(pat)
+
+
+
+def stop_steam_client() -> None:
+    '''Best-effort shutdown of the Steam client (not SteamVR).
+
+    We first request a clean shutdown (steam -shutdown) *only if* Steam is already
+    running, then we terminate remaining Steam processes.
+    '''
+    steam_running = subprocess.run(["pgrep", "-x", "steam"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if steam_running and shutil.which("steam") is not None:
+        subprocess.run(["steam", "-shutdown"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    pats = [
+        r"(^|/)(steam)(\s|$)",
+        r"steamwebhelper",
+        r"steamservice",
+        r"steamerrorreporter",
+    ]
+    for pat in pats:
+        pkill(pat, sig="TERM")
+    for pat in pats:
+        wait_gone(pat, timeout_s=3.0)
+
+    if any(pgrep_any(p) for p in pats):
+        for pat in pats:
+            pkill(pat, sig="KILL")
+        for pat in pats:
+            wait_gone(pat, timeout_s=2.0)
+
+
+def ensure_steam_and_steamvr_closed_for_wivrn(cfg: dict[str, str]) -> None:
+    '''When entering WiVRn mode, ensure SteamVR *and* Steam are not running.'''
+    # SteamVR compositor bits first
+    if _is_true(cfg.get("steamvr_close_on_wivrn", "true")):
+        pats = ["vrcompositor", "vrserver", "vrmonitor", "vrwebhelper", "steamvr"]
+        for pat in pats:
+            pkill(pat, sig="TERM")
+        for pat in pats:
+            wait_gone(pat, timeout_s=2.0)
+        if any(pgrep_any(p) for p in pats):
+            for pat in pats:
+                pkill(pat, sig="KILL")
+            for pat in pats:
+                wait_gone(pat, timeout_s=2.0)
+
+    if _is_true(cfg.get("steam_close_on_wivrn", "true")):
+        stop_steam_client()
+
+
+def stop_xrizer() -> None:
+    for pat in ["/opt/xrizer", "xrizer"]:
+        pkill(pat)
+
+
+def check_avahi() -> None:
+    # WiVRn commonly relies on mDNS; warn if avahi isn't running.
+    rc, out = run(["systemctl", "is-active", "avahi-daemon"], timeout=2)
+    if rc != 0:
+        log("NOTE: avahi-daemon is not active. If your headset can't discover the PC, enable it: sudo systemctl enable --now avahi-daemon")
+
+
+def _ss_listen_lines() -> list[str]:
+    """Return `ss -Hln` lines (best effort)."""
+    if shutil.which("ss") is None:
+        return []
+    rc, out = run(["ss", "-Hln"], timeout=2)
+    if rc != 0:
+        return []
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def _ss_tcp_lines() -> list[str]:
+    """Return `ss -Htn` lines (best effort)."""
+    if shutil.which("ss") is None:
+        return []
+    rc, out = run(["ss", "-Htn"], timeout=2)
+    if rc != 0:
+        return []
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def is_listening_tcp(port: int) -> bool:
+    # Prefer a non-intrusive check (avoid making a dummy client connection).
+    if shutil.which("ss") is None:
+        # Fallback (intrusive): try a quick local connect.
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return True
+        except Exception:
+            return False
+    for ln in _ss_listen_lines():
+        # Example: LISTEN 0 4096 0.0.0.0:9757 0.0.0.0:* 
+        if re.search(rf"\bLISTEN\b.*\S+:{port}\b", ln):
+            return True
+    return False
+
+
+def has_established_tcp(port: int) -> bool:
+    # Detect a real client connection to the server port.
+    if shutil.which("ss") is None:
+        return False
+    for ln in _ss_tcp_lines():
+        # Example: ESTAB 0 0 192.168.1.10:9757 192.168.1.20:54321
+        if re.search(rf"\bESTAB\b.*\S+:{port}\b\s+\S+", ln):
+            return True
+    return False
+
+
+def wait_port(host: str, port: int, timeout_s: float = 10.0) -> bool:
+    """Wait until a local TCP port is LISTENing.
+
+    Kept for API compatibility with older code paths; `host` is ignored.
+    """
+    end = time.time() + timeout_s
+    while time.time() < end and not _STOP_REQUESTED:
+        if is_listening_tcp(port):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def wait_wivrn_client(port: int, timeout_s: float = 0.0) -> bool:
+    """Wait for a real client connection to WiVRn.
+
+    If timeout_s <= 0, wait indefinitely (until stop is requested).
+    """
+    start = time.time()
+    while not _STOP_REQUESTED:
+        if has_established_tcp(port):
+            return True
+        if timeout_s > 0 and (time.time() - start) >= timeout_s:
+            return False
+        time.sleep(0.5)
+
+
+def stop_stack(cfg: dict[str, str], steamvr_root: Path | None) -> None:
+    log("Stopping stack…")
+
+    vr_pat = cfg.get("vr_pgrep", "").strip()
+    srv_pat = cfg.get("server_pgrep", "").strip()
+    trk_pat = cfg.get("tracking_ready", "").strip()
+
+    # SteamVR mode: also stop SteamVR bits early so they don't hold devices open
+    if cfg.get("xr_runtime", "wivrn").lower() == "steamvr":
+        stop_steamvr_processes()
+
+    # Decide whether we should stop tracking
+    stop_tracking = False
+    if _is_true(cfg.get("tracking_enabled", "true")):
+        stop_tracking = True
+    elif _is_true(cfg.get("tracking_stop_when_disabled", "true")):
+        stop_tracking = True
+
+    # Helper: TERM, then KILL if needed
+    def kill_and_wait(pat: str, name: str, term_s: float = 8.0, kill_s: float = 2.0) -> None:
+        if not pat:
+            return
+        pkill(pat, sig="TERM")
+        if wait_gone(pat, timeout_s=term_s):
+            return
+        log(f"WARNING: {name} still running after {term_s:.0f}s; sending SIGKILL")
+        pkill(pat, sig="KILL")
+        wait_gone(pat, timeout_s=kill_s)
+
+    # Reverse order: VR app -> server -> tracking
+    kill_and_wait(vr_pat, "VR app")
+    kill_and_wait(srv_pat, "server")
+    if stop_tracking:
+        kill_and_wait(trk_pat, "tracking")
+
+    # In non-SteamVR mode, still clean up any stray SteamVR bits if configured
+    if _is_true(cfg.get("steamvr_kill_on_stop", "true")):
+        stop_steamvr_processes()
+
+    # Optional safety: reset OpenXR user override on stop.
+    # - Always do this in WiVRn mode (your system works only when the override is missing).
+    # - In SteamVR mode, do it only if openxr_reset_on_stop=true in stack.conf.
+    try:
+        xr = cfg.get("xr_runtime", "wivrn").lower().strip()
+        if xr != "steamvr" or _is_true(cfg.get("openxr_reset_on_stop", "false")):
+            ACTIVE_OPENXR.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    log("Stack stopped")
+
+
+def start_tracking(cfg: dict[str, str], env: dict[str, str]) -> None:
+    if not _is_true(cfg.get("tracking_enabled", "true")):
+        log("Tracking disabled")
+        return
+
+    cmd = cfg.get("tracking_cmd", "").strip()
+    ready = cfg.get("tracking_ready", "").strip()
+
+    if not cmd:
+        return
+
+    if ready and pgrep_any(ready):
+        log("Tracking already running")
+        return
+
+    log(f"Starting tracking: {cmd}")
+    spawn_cmd(cmd, env=env, appimage_extract=True)
+
+    if ready:
+        log(f"Waiting for tracking ready: {ready}")
+        end = time.time() + 30.0
+        while time.time() < end and not _STOP_REQUESTED:
+            if pgrep_any(ready):
+                return
+            time.sleep(0.25)
+        log("WARNING: tracking ready pattern not seen (continuing)")
+
+
+def start_wivrn_mode(cfg: dict[str, str], env: dict[str, str], steamvr_root: Path | None) -> None:
+    # prevent compositor conflicts
+    stop_steamvr_processes()
+
+    # start server
+    srv_cmd = cfg.get("server_cmd", "").strip()
+    srv_pat = cfg.get("server_pgrep", "").strip()
+
+    if srv_cmd:
+        if srv_pat and pgrep_any(srv_pat):
+            log("Server already running")
+        else:
+            log(f"Starting server: {srv_cmd}")
+            spawn_cmd(srv_cmd, env=env)
+
+    # readiness: WiVRn typically uses 9757
+    if wait_port("127.0.0.1", 9757, timeout_s=8.0):
+        log("WiVRn server is listening (port 9757)")
+    else:
+        log("NOTE: WiVRn server port 9757 not confirmed yet (continuing)")
+
+    # Important: launching OpenXR apps *before* the headset connects can cause
+    # XR_ERROR_RUNTIME_UNAVAILABLE (WayVR then falls back to OpenVR and exits).
+    # We wait for a real client connection to avoid flaky starts.
+    if _is_true(cfg.get("wivrn_wait_for_client", "true")):
+        if shutil.which("ss") is None:
+            log("NOTE: 'ss' not found; cannot detect headset connection. Continuing without client-wait.")
+        else:
+            timeout_s = float(cfg.get("wivrn_wait_timeout_s", "0") or "0")
+            log("Waiting for headset to connect in the WiVRn app…")
+            ok = wait_wivrn_client(9757, timeout_s=timeout_s)
+            if ok:
+                log("Headset connected")
+            else:
+                if _STOP_REQUESTED:
+                    log("Stop requested while waiting for headset; aborting start")
+                    return
+                log("NOTE: no headset connection detected yet (continuing)")
+
+    if _STOP_REQUESTED:
+        log("Stop requested; not starting VR app")
+        return
+
+    # start VR app
+    vr_cmd = cfg.get("vr_cmd", "").strip()
+    vr_pat = cfg.get("vr_pgrep", "").strip()
+
+    if vr_cmd:
+        if vr_pat and pgrep_any(vr_pat):
+            log("VR app already running")
+        else:
+            log(f"Starting VR app: {vr_cmd}")
+            spawn_cmd(vr_cmd, env=env)
+
+
+def start_steamvr_mode(cfg: dict[str, str], env: dict[str, str], steamvr_root: Path | None) -> None:
+    # SteamVR mode: ensure WiVRn side isn't running
+    pkill(cfg.get("vr_pgrep", ""))
+    pkill(cfg.get("server_pgrep", ""))
+
+    stop_xrizer()
+
+    if _is_true(cfg.get("steamvr_autostart", "false")):
+        launch = cfg.get("steamvr_launch", "steam steam://rungameid/250820")
+        log("Launching SteamVR…")
+        spawn_cmd(launch, env=env)
+    else:
+        log("SteamVR mode selected (auto-launch disabled)")
+
+
+def start_stack(cfg: dict[str, str]) -> tuple[dict[str, str], Path | None]:
+    xr = cfg.get("xr_runtime", "wivrn").lower().strip()
+
+    if _STOP_REQUESTED:
+        return
+
+
+    steamvr_root = detect_steamvr_root()
+
+    # Repair/generate OpenVR paths early so VR_PATHREG_OVERRIDE can always point at a real file.
+    try:
+        prefer = 'steamvr' if xr == 'steamvr' else 'xrizer'
+        fix_openvrpaths(prefer, steamvr_root)
+    except Exception:
+        pass
+
+    # environment for launched apps
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(Path.home() / ".config")
+
+    # --- OpenXR runtime handling ---
+    # SteamVR mode: set per-user override and export XR_RUNTIME_JSON so launched apps are consistent.
+    # WiVRn mode (your system-specific quirk): DO NOT set a user override and DO NOT export XR_RUNTIME_JSON.
+    # Let the loader fall back to /etc/openxr/1/active_runtime.json (the only state you reported as reliable).
+    if xr == "steamvr":
+        runtime_for_env: Path | None = None
+        if steamvr_root is None:
+            log("WARNING: SteamVR not detected; OpenXR may not work for SteamVR mode")
+        else:
+            rt = ensure_steamvr_runtime_json(steamvr_root)
+            if rt is not None:
+                ok = set_active_openxr(rt)
+                runtime_for_env = ACTIVE_OPENXR if ok else rt
+
+        if runtime_for_env is not None:
+            env["OPENXR_RUNTIME_JSON"] = str(runtime_for_env)
+            env["XR_RUNTIME_JSON"] = str(runtime_for_env)
+    else:
+        # Clear user override so OpenXR loader uses system default.
+        try:
+            ACTIVE_OPENXR.unlink(missing_ok=True)
+        except Exception:
+            pass
+        env.pop("OPENXR_RUNTIME_JSON", None)
+        env.pop("XR_RUNTIME_JSON", None)
+
+
+
+
+
+    # WiVRn mode: ensure Steam and SteamVR are closed so SteamVR can't hijack the runtime.
+    if xr != "steamvr":
+        try:
+            ensure_steam_and_steamvr_closed_for_wivrn(cfg)
+        except Exception:
+            pass
+
+    # Force OpenVR to use a stable openvrpaths.vrpath, even inside Steam containers.
+    # (Steam can sometimes read/write its own copy and ignore ~/.config/openvr.)
+    try:
+        canon = Path.home() / ".local" / "share" / "openvr" / "openvrpaths.vrpath"
+        # Point OpenVR at the canonical file; fix_openvrpaths() above should have created it.
+        env["VR_PATHREG_OVERRIDE"] = str(canon)
+    except Exception:
+        pass
+
+
+    # --- Steam / Proton compatibility (pressure-vessel container) ---
+    # WayVR commonly launches Steam itself (steam://launch/...). When Steam/Proton
+    # runs games inside pressure-vessel, it may not be able to see host OpenXR
+    # runtimes or host-installed OpenVR shims (xrizer) unless we explicitly
+    # import/expose them.
+    #
+    # These are safe even when you are not launching Steam games, and they make
+    # "OpenVR via xrizer -> OpenXR (Monado/WiVRn)" work more reliably.
+    env.setdefault("PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES", "1")
+
+    def _pv_add_path(var: str, path: str) -> None:
+        cur = env.get(var, "")
+        parts = [p for p in cur.split(":") if p]
+        if path not in parts:
+            parts.append(path)
+        env[var] = ":".join(parts)
+
+    # Ensure /opt/xrizer is visible inside the container (RO is fine).
+    if Path("/opt/xrizer").exists():
+        _pv_add_path("PRESSURE_VESSEL_FILESYSTEMS_RO", "/opt/xrizer")
+
+    # If the user has an OpenVR override dir (e.g. SlimeVRDriver) that needs to be
+    # writable inside Steam's container, expose it.
+    xdg_runtime = env.get("XDG_RUNTIME_DIR", "")
+    if xdg_runtime:
+        _pv_add_path("PRESSURE_VESSEL_FILESYSTEMS_RW", str(Path(xdg_runtime) / "SlimeVRDriver"))
+
+    # IMPORTANT: If Steam is already running, games started via `steam://launch/...`
+    # will inherit *Steam's* environment, not WayVR/vr-stackd's. That can make VR
+    # games fail to discover the OpenXR runtime or the xrizer OpenVR shim.
+    #
+    # If you want vr-stackd to manage this automatically, set:
+    #   steam_manage=true
+    # and optionally:
+    #   steam_restart=true
+    if xr == "steamvr" and _is_true(cfg.get("steam_manage", "false")):
+        def _steam_running() -> bool:
+            return subprocess.run(["pgrep", "-x", "steam"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+        if _steam_running() and _is_true(cfg.get("steam_restart", "false")):
+            log("Steam is running; requesting shutdown so it can inherit stack environment…")
+            subprocess.run(["steam", "-shutdown"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Wait a bit for Steam to exit.
+            deadline = time.time() + 20
+            while time.time() < deadline and _steam_running():
+                time.sleep(0.5)
+
+        if _steam_running():
+            log("NOTE: Steam is already running; Steam-launched games may ignore stack environment.\n"
+                "If VR games won't enter the headset, enable steam_restart=true in stack.conf.")
+        else:
+            log("Starting Steam with stack environment (for Steam/Proton VR compatibility)…")
+            subprocess.Popen(
+                ["steam", "-silent"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+    log(f"XR_RUNTIME={xr}")
+    log(f"ACTIVE_OPENXR={ACTIVE_OPENXR}")
+
+    log(f"XR_RUNTIME={xr}")
+    log(f"ACTIVE_OPENXR={ACTIVE_OPENXR}")
+
+    # OpenVR runtime switch (best effort)
+    # Always keep openvrpaths.vrpath present/normalized (even if SteamVR isn't installed yet).
+    try:
+        prefer = 'steamvr' if xr == 'steamvr' else 'xrizer'
+        fix_openvrpaths(prefer, steamvr_root)
+    except Exception:
+        pass
+
+    if xr == "steamvr":
+        if steamvr_root:
+            set_openvr_runtime(str(steamvr_root), steamvr_root)
+    else:
+        if Path("/opt/xrizer").is_dir():
+            set_openvr_runtime("/opt/xrizer", steamvr_root)
+
+    # Now start components
+    start_tracking(cfg, env)
+
+    if xr == "steamvr":
+        start_steamvr_mode(cfg, env, steamvr_root)
+    else:
+        check_avahi()
+        start_wivrn_mode(cfg, env, steamvr_root)
+
+    return env, steamvr_root
+
+
+def monitor_and_cascade(cfg: dict[str, str], steamvr_root: Path | None) -> None:
+    # If we're stopping (SIGTERM/SIGINT), don't start monitoring or keep the service alive.
+    if _STOP_REQUESTED:
+        return
+
+    xr = cfg.get("xr_runtime", "wivrn").lower().strip()
+
+    mon = (cfg.get("monitor_pgrep") or "").strip()
+    if mon:
+        pattern = mon
+    elif xr == "steamvr":
+        # Default monitor for SteamVR mode
+        pattern = r"vrserver|vrcompositor"
+    else:
+        # WiVRn mode: monitor VR app
+        pattern = (cfg.get("vr_pgrep") or "").strip() or r"wayvr"
+
+    log(f"Monitoring for cascade stop: {pattern}")
+
+    # wait for it to appear (if it never appears, we still keep the service alive briefly)
+    appeared = False
+    end_appear = time.time() + 30.0
+    while time.time() < end_appear and not _STOP_REQUESTED:
+        if pgrep_any(pattern):
+            appeared = True
+            break
+        time.sleep(0.5)
+
+    if not appeared:
+        if _STOP_REQUESTED:
+            return
+        log("NOTE: monitored process never appeared; service will keep running until stopped")
+        while not _STOP_REQUESTED:
+            time.sleep(1.0)
+        return
+
+    # now wait until it disappears
+    while not _STOP_REQUESTED:
+        if not pgrep_any(pattern):
+            log("Monitored process exited -> cascading stop")
+            stop_stack(cfg, steamvr_root)
+            return
+        time.sleep(1.0)
+
+
+def _handle_signal(signum, _frame):
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    log(f"Received signal {signum}; stopping…")
+
+
+def usage() -> None:
+    print("Usage: vr-stackd [start|stop|restart|run]", file=sys.stderr)
+
+
+def main(argv: list[str]) -> int:
+    global _STOP_REQUESTED
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _handle_signal)
+
+    cmd = (argv[1] if len(argv) > 1 else "start").strip().lower()
+
+    cfg = load_cfg()
+
+    # light file lock to prevent double-start races
+    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "vr-stackd.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fh = lock_path.open("w")
+    try:
+        import fcntl
+
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        # Another instance is likely running
+        if cmd in {"start", "run"}:
+            log("Another vr-stackd instance is already running")
+            return 0
+
+    log(f"=== vr-stackd {cmd} ===")
+
+    steamvr_root = detect_steamvr_root()
+
+    if cmd == "stop":
+        stop_stack(cfg, steamvr_root)
+        return 0
+
+    if cmd == "restart":
+        stop_stack(cfg, steamvr_root)
+        time.sleep(0.5)
+        _STOP_REQUESTED = False
+        _env, steamvr_root = start_stack(cfg)
+        return 0
+
+    if cmd == "start":
+        _env, steamvr_root = start_stack(cfg)
+        return 0
+
+    if cmd == "run":
+        _env, steamvr_root = start_stack(cfg)
+        if _STOP_REQUESTED:
+            stop_stack(cfg, steamvr_root)
+            return 0
+        monitor_and_cascade(cfg, steamvr_root)
+        return 0
+
+    usage()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

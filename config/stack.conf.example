@@ -1,25 +1,58 @@
 # VR Stack configuration (bash-sourced)
-TRACK_CMD="/opt/slimevr/slimevr"
-TRACK_READY_PGREP="slimevr\.jar"
 
+# Tracking (optional)
+TRACK_CMD="slimevr"
+TRACK_READY_PGREP="slimevr\.jar"
+tracking_enabled=true
+tracking_stop_when_disabled=true
+
+# WiVRn server (Quest streaming)
 SERVER_CMD="wivrn-server"
 SERVER_PGREP="wivrn-server"
 
-VR_CMD="wayvr"
+# WiVRn connection gating:
+# Launching OpenXR apps before the headset connects can cause XR_ERROR_RUNTIME_UNAVAILABLE.
+# Default behavior is to wait until a client connects.
+wivrn_wait_for_client=true
+
+# Timeout in seconds; 0 means wait forever.
+wivrn_wait_timeout_s=0
+
+# Desktop/overlay app used in WiVRn mode
+VR_CMD="wayvr --openxr --show"
 VR_PGREP="(^|/)(wayvr)(\s|$)"
 
-OPENXR_JSON="/usr/share/openxr/1/openxr_wivrn.json"
-
-# Enable/disable tracking backend (e.g. SlimeVR)
-tracking_enabled='true'
-
-# If tracking_enabled=false, should Stop Stack also stop tracking?
-tracking_stop_when_disabled='true'
-
 # OpenXR runtime JSON to use for the stack
-# WiVRn (Quest): /usr/share/openxr/1/openxr_wivrn.json
-# SteamVR:       /usr/share/openxr/1/openxr_steamvr.json
-openxr_json='/usr/share/openxr/1/openxr_wivrn.json'
+# WiVRn (Quest):   /usr/share/openxr/1/openxr_wivrn.json
+# SteamVR (Linux): /usr/share/openxr/1/openxr_steamvr.json  (name varies by distro)
+#
+# Tip: the OpenXR loader actually uses /.config/openxr/1/active_runtime.json.
+# This app will keep active_runtime.json pointing at the runtime you select.
+openxr_json="/usr/share/openxr/1/openxr_wivrn.json"
 
 # Short name for the runtime selector in the GUI: wivrn | steamvr
-xr_runtime='wivrn'
+xr_runtime="wivrn"
+
+# Optional: SteamVR launcher command (default uses AppID 250820)
+# steamvr_launch='steam steam://rungameid/250820'
+
+# Optional: Auto-launch SteamVR when xr_runtime='steamvr'.
+# Recommended: keep this false to avoid SteamVR opening unexpectedly.
+# steamvr_autostart='false'
+
+# Optional: monitor pattern. When this process exits, the service will stop the stack.
+# - Default (WiVRn): monitors VR_PGREP (your VR app). Closing your VR app stops the stack.
+# - Default (SteamVR): monitors vrserver/vrcompositor.
+# monitor_pgrep='(^|/)(your-app)(\s|$)'
+
+# --- Steam hygiene in WiVRn mode ---
+# When switching to WiVRn, SteamVR sometimes re-asserts itself (or Steam pops open).
+# These defaults keep WiVRn mode "pure" by force-closing SteamVR + Steam.
+steamvr_close_on_wivrn=true
+steam_close_on_wivrn=true
+
+# --- Optional: Steam environment management (SteamVR mode only) ---
+# If you launch VR apps via steam:// URLs (WayVR -> Steam game), Steam's own environment can
+# ignore the stack environment. Enable this ONLY if needed.
+# steam_manage=false
+# steam_restart=false

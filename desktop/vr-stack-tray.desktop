@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=VR Stack Tray
+Comment=Tray icon for VR Stack Control
+Exec=vr-control tray
+Icon=video-display
+Terminal=false
+Categories=Utility;

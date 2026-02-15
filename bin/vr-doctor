@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+VERSION = "v0.6.85-openxrfix9-close-steam-on-wivrn21"
+
+HOME = Path.home()
+
+CANON = HOME / ".local" / "share" / "openvr" / "openvrpaths.vrpath"
+LEGACY = HOME / ".config" / "openvr" / "openvrpaths.vrpath"
+STEAM_PATHS = [
+    HOME / ".steam" / "steam" / "config" / "openvrpaths.vrpath",
+    HOME / ".local" / "share" / "Steam" / "config" / "openvrpaths.vrpath",
+    HOME / ".steam" / "root" / "config" / "openvrpaths.vrpath",
+]
+ACTIVE_OPENXR = HOME / ".config" / "openxr" / "1" / "active_runtime.json"
+SYSTEM_OPENXR = Path("/etc/openxr/1/active_runtime.json")
+WIVRN_ALIAS = HOME / ".config" / "openxr" / "1" / "wivrn_runtime.json"
+STACK_CONF = HOME / ".config" / "vr-stack" / "stack.conf"
+
+
+def ensure_openvrpaths() -> None:
+    """Best-effort repair of ~/.local/share/openvr/openvrpaths.vrpath.
+
+    Doctor output is much more useful if the canonical OpenVR file exists, so we
+    create a minimal one if missing.
+    """
+    try:
+        CANON.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    # Break symlink loops (ELOOP / "Too many levels of symbolic links").
+    # CANON must be a real file; LEGACY should be a symlink to CANON.
+    for p in (CANON, LEGACY):
+        try:
+            if p.is_symlink():
+                p.unlink()
+        except Exception:
+            pass
+
+    if CANON.exists():
+        return
+
+    # Find Steam config/log dirs if they exist
+    cfg_candidates = [
+        HOME / '.local' / 'share' / 'Steam' / 'config',
+        HOME / '.steam' / 'steam' / 'config',
+        HOME / '.steam' / 'root' / 'config',
+    ]
+    log_candidates = [
+        HOME / '.local' / 'share' / 'Steam' / 'logs',
+        HOME / '.steam' / 'steam' / 'logs',
+        HOME / '.steam' / 'root' / 'logs',
+    ]
+    cfg_dir = next((c for c in cfg_candidates if c.is_dir()), None)
+    log_dir = next((c for c in log_candidates if c.is_dir()), None)
+
+    runtimes: list[str] = []
+    if Path('/opt/xrizer').is_dir():
+        runtimes.append('/opt/xrizer')
+
+    # Try common SteamVR locations (native + flatpak)
+    for cand in [
+        HOME / '.local' / 'share' / 'Steam' / 'steamapps' / 'common' / 'SteamVR',
+        HOME / '.steam' / 'steam' / 'steamapps' / 'common' / 'SteamVR',
+        HOME / '.steam' / 'root' / 'steamapps' / 'common' / 'SteamVR',
+        HOME / '.var' / 'app' / 'com.valvesoftware.Steam' / '.local' / 'share' / 'Steam' / 'steamapps' / 'common' / 'SteamVR',
+    ]:
+        try:
+            if cand.is_dir():
+                runtimes.append(str(cand))
+        except Exception:
+            pass
+
+    # Dedupe
+    seen = set()
+    runtimes = [r for r in runtimes if not (r in seen or seen.add(r))]
+
+    data0 = {
+        'config': [str(cfg_dir)] if cfg_dir else [],
+        'external_drivers': None,
+        'jsonid': 'vrpathreg',
+        'log': [str(log_dir)] if log_dir else [],
+        'runtime': runtimes,
+        'version': 1,
+    }
+
+    try:
+        CANON.write_text(json.dumps(data0, indent=4) + "\n", encoding='utf-8')
+    except Exception:
+        return
+
+    # Ensure legacy symlink points at canonical
+    try:
+        LEGACY.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+    try:
+        # Avoid LEGACY.exists() here because it follows symlinks and can ELOOP.
+        if LEGACY.is_symlink():
+            LEGACY.unlink()
+        elif LEGACY.exists():
+            LEGACY.unlink()
+        LEGACY.symlink_to(CANON)
+    except Exception:
+        pass
+
+
+def run(cmd: list[str]) -> tuple[int, str]:
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return p.returncode, (p.stdout or "").strip()
+    except FileNotFoundError:
+        return 127, ""
+    except Exception as e:
+        return 1, str(e)
+
+
+def pgrep_any(patterns: list[str]) -> bool:
+    for pat in patterns:
+        rc, _ = run(["pgrep", "-af", pat])
+        if rc == 0:
+            return True
+    return False
+
+
+def read_json(path: Path) -> tuple[bool, dict | None, str]:
+    if not path.exists():
+        return False, None, "missing"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        return True, data, "ok"
+    except Exception as e:
+        return False, None, f"invalid json: {e}"
+
+
+def runtime_first_is_xrizer(data: dict | None) -> tuple[bool, str]:
+    if not data:
+        return False, "no data"
+    rt = data.get("runtime") or []
+    if not isinstance(rt, list) or not rt:
+        return False, "runtime list empty"
+    first = str(rt[0])
+    return first == "/opt/xrizer", f"first={first}"
+
+
+def print_kv(k: str, v: str):
+    print(f"{k}: {v}")
+
+
+def main() -> int:
+    print(f"VR Stack Control Doctor {VERSION}")
+    print("-")
+
+    print_kv("Desktop", os.environ.get("XDG_CURRENT_DESKTOP", ""))
+    print_kv("Session", os.environ.get("XDG_SESSION_TYPE", ""))
+
+    # OpenXR
+    ok, data, msg = read_json(ACTIVE_OPENXR)
+    print_kv("OpenXR active_runtime.json", f"{ACTIVE_OPENXR} ({msg})")
+    if not ok and msg.startswith("missing") and SYSTEM_OPENXR.exists():
+        ok_sys, data_sys, msg_sys = read_json(SYSTEM_OPENXR)
+        print_kv("OpenXR system active_runtime.json", f"{SYSTEM_OPENXR} ({msg_sys})")
+        if ok_sys and data_sys:
+            name = (((data_sys.get("runtime") or {}) or {}).get("name"))
+            lib = (((data_sys.get("runtime") or {}) or {}).get("library_path"))
+            if name:
+                print_kv("OpenXR system runtime name", str(name))
+            if lib:
+                print_kv("OpenXR system library", str(lib))
+
+    if ok and data:
+        name = (((data.get("runtime") or {}) or {}).get("name"))
+        lib = (((data.get("runtime") or {}) or {}).get("library_path"))
+        if name:
+            print_kv("OpenXR runtime name", str(name))
+        if lib:
+            print_kv("OpenXR library", str(lib))
+
+    # Stack config
+    if STACK_CONF.exists():
+        print_kv("Stack config", str(STACK_CONF))
+        txt = STACK_CONF.read_text(errors="ignore")
+        for key in ("xr_runtime", "openxr_json", "steamvr_autostart"):
+            for line in txt.splitlines():
+                if line.strip().startswith(key + "="):
+                    print_kv(f"stack.conf {key}", line.split("=", 1)[1].strip())
+                    break
+    else:
+        print_kv("Stack config", "missing")
+
+    # OpenVR
+    print_kv("OpenVR canonical", str(CANON))
+    okc, datac, msgc = read_json(CANON)
+    print_kv("OpenVR canonical status", msgc)
+    if okc:
+        ok_first, why = runtime_first_is_xrizer(datac)
+        print_kv("OpenVR canonical xrizer-first", "YES" if ok_first else f"NO ({why})")
+
+    if LEGACY.exists() and LEGACY.is_symlink():
+        print_kv("OpenVR legacy", f"symlink -> {LEGACY.resolve(strict=False)}")
+    else:
+        print_kv("OpenVR legacy", f"{LEGACY} ({'exists' if LEGACY.exists() else 'missing'})")
+
+    # Steam openvrpaths copies (optional)
+    for sp in STEAM_PATHS:
+        if sp.exists():
+            oks, datas, msgs = read_json(sp)
+            extra = ""
+            if oks:
+                ok_first, why = runtime_first_is_xrizer(datas)
+                extra = " xrizer-first=YES" if ok_first else f" xrizer-first=NO ({why})"
+            print_kv("Steam openvrpaths", f"{sp} ({msgs}){extra}")
+
+    print_kv("XRizer present", "YES" if Path('/opt/xrizer').is_dir() else "NO")
+
+    # Processes
+    steamvr_running = pgrep_any(["vrserver", "vrcompositor", "vrmonitor", "steamvr", "SteamVR"]) 
+    print_kv("SteamVR processes", "RUNNING" if steamvr_running else "not running")
+
+    # Services
+    for svc in ("vr-stack-tray.service", "vr-stack-control.service"):
+        rc, out = run(["systemctl", "--user", "is-active", svc])
+        st = out.strip() if out else ("unknown" if rc else "")
+        print_kv(f"systemd {svc}", st)
+
+    print("-")
+    # Exit non-zero if WiVRn mode but xrizer is not first
+    # Try to infer WiVRn mode from stack.conf or OpenXR runtime name
+    wivrn_mode = False
+    try:
+        if STACK_CONF.exists():
+            txt = STACK_CONF.read_text(errors="ignore")
+            if "xr_runtime=wivrn" in txt or "xr_runtime = wivrn" in txt:
+                wivrn_mode = True
+        if ok and data:
+            name = (((data.get("runtime") or {}) or {}).get("name"))
+            if str(name).lower() == "wivrn":
+                wivrn_mode = True
+    except Exception:
+        pass
+
+    if wivrn_mode and okc:
+        ok_first, _ = runtime_first_is_xrizer(datac)
+        if not ok_first:
+            return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

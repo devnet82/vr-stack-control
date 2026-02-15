@@ -3,16 +3,16 @@ Description=VR Stack Control (tracking -> server -> VR app)
 After=default.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
-# Start the stack in the correct order
-ExecStart=%h/.local/bin/vr-stack-run.sh start
+ExecStart=%h/.local/bin/vr-stackd run
+ExecStop=%h/.local/bin/vr-stackd stop
 
-# Stop cleanly using the same config/patterns
-ExecStop=%h/.local/bin/vr-stack-run.sh stop
+TimeoutStopSec=20
 
-TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target
