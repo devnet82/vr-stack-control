@@ -6,10 +6,10 @@ Tracking -> Streaming Server -> VR App
 
 It keeps OpenXR/OpenVR state sane (no stuck SteamVR overrides, no missing OpenVR paths) and launches things in the right order every time.
 
-Made by: David Coates (idea + testing) + ChatGPT (implementation help)
+Made by: Devnet (idea + testing) + ChatGPT (implementation help)
 
-Repo: https://github.com/devnet82-ship-it/wivrn-stack-control
-Pages: https://devnet82-ship-it.github.io/wivrn-stack-control/
+Repo: https://github.com/devnet82/vr-stack-control
+Pages: https://devnet82.github.io/vr-stack-control/
 
 ---
 
@@ -44,7 +44,7 @@ Install (fish-safe):
 ```fish
 cd ~/Downloads
 # Replace this with your exact filename if needed
-set ZIP vr-stack-control-v0.6.85-openxrfix9-close-steam-on-wivrn21.zip
+set ZIP vr-stack-control-v0.6.85.zip
 
 rm -rf vr-stack-control-v0.6.85
 unzip -o "$ZIP" -d vr-stack-control-v0.6.85
