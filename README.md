@@ -42,16 +42,14 @@ https://github.com/devnet82-ship-it/wivrn-stack-control/releases
 Install (fish-safe):
 
 ```fish
-cd ~/Downloads
-# Replace this with your exact filename if needed
-set ZIP vr-stack-control-v0.6.85.zip
+  cd ~/Downloads
+  rm -rf vr-stack-control-v0.6.85
+  unzip -o vr-stack-control-v0.6.85.zip
+  cd vr-stack-control-v0.6.85
+  chmod +x install.sh uninstall.sh bin/*
+  ./install.sh
+  systemctl --user daemon-reload
 
-rm -rf vr-stack-control-v0.6.85
-unzip -o "$ZIP" -d vr-stack-control-v0.6.85
-cd vr-stack-control-v0.6.85
-chmod +x install.sh uninstall.sh bin/*
-./install.sh
-systemctl --user daemon-reload
 ```
 
 Run GUI:
