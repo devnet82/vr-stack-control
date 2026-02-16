@@ -8,9 +8,6 @@ It keeps OpenXR/OpenVR state sane (no stuck SteamVR overrides, no missing OpenVR
 
 Made by: Devnet (idea + testing) + ChatGPT (implementation help)
 
-Repo: https://github.com/devnet82/vr-stack-control
-Pages: https://devnet82.github.io/vr-stack-control/
-
 ---
 
 ## Links (where to get everything)
