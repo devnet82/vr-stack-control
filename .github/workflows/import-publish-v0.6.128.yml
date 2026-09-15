@@ -1,0 +1,79 @@
+name: Import and publish VR Stack Control v0.6.128
+
+on:
+  push:
+    branches:
+      - import-v0.6.128
+
+permissions:
+  contents: write
+
+jobs:
+  import-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out import branch
+        uses: actions/checkout@v4
+        with:
+          ref: import-v0.6.128
+          fetch-depth: 0
+
+      - name: Decode and verify exact release source
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/vr-release
+          mkdir -p /tmp/vr-release
+          base64 -d release-import/vr-stack-control-v0.6.128-source.tar.gz.b64 > /tmp/vr-stack-control-v0.6.128-source.tar.gz
+          gzip -t /tmp/vr-stack-control-v0.6.128-source.tar.gz
+          tar -tzf /tmp/vr-stack-control-v0.6.128-source.tar.gz > /tmp/vr-stack-control-v0.6.128-files.txt
+          tar -xzf /tmp/vr-stack-control-v0.6.128-source.tar.gz -C /tmp/vr-release
+          test "$(cat /tmp/vr-release/vr-stack-control-v0.6.128/VERSION)" = "0.6.128"
+          test ! -d /tmp/vr-release/vr-stack-control-v0.6.128/bin/__pycache__
+          cd /tmp/vr-release/vr-stack-control-v0.6.128
+          bash tests/test-package.sh
+
+      - name: Replace main with verified v0.6.128 source
+        run: |
+          set -euo pipefail
+          SRC=/tmp/vr-release/vr-stack-control-v0.6.128
+          git config user.name "devnet82"
+          git config user.email "42787601+devnet82@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a "$SRC"/. .
+          git add -A
+          git diff --cached --check
+          git commit -m "Release VR Stack Control v0.6.128"
+          git push origin main
+
+      - name: Re-run QA from committed release tree
+        run: |
+          set -euo pipefail
+          bash tests/test-package.sh
+          test "$(cat VERSION)" = "0.6.128"
+          test ! -d bin/__pycache__ || rm -rf bin/__pycache__
+
+      - name: Build and verify release archive
+        run: |
+          set -euo pipefail
+          git archive --format=zip --prefix=vr-stack-control-v0.6.128/ HEAD -o vr-stack-control-v0.6.128.zip
+          unzip -t vr-stack-control-v0.6.128.zip
+          sha256sum vr-stack-control-v0.6.128.zip > vr-stack-control-v0.6.128.zip.sha256
+
+      - name: Publish guarded GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.6.128 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v0.6.128 already exists; refusing to replace it."
+            exit 1
+          fi
+          gh release create v0.6.128 \
+            vr-stack-control-v0.6.128.zip \
+            vr-stack-control-v0.6.128.zip.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target main \
+            --title "VR Stack Control v0.6.128" \
+            --notes-file RELEASE-NOTES.md
