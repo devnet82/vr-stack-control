@@ -1,0 +1,218 @@
+name: Devnet CachyOS App VM QA v0.1.11
+on:
+  push:
+    branches:
+      - qa/cachyos-app-acceptance-v0.1.11
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  test-real-cachyos:
+    name: CachyOS KVM ${{ matrix.chipset }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        chipset: [q35, pc]
+    env:
+      QA_CANDIDATE_URL: ${{ secrets.DEVNET_QA_APP_019_URL }}
+      QA_RELEASE_TAG: cachyos-repair-qa-assets-v0.1.19
+      GITHUB_TOKEN: ${{ github.token }}
+      QA_CANDIDATE_HASH: 435bc2a88a99eef4cd5e85d71d50ca36e3d3f40361efe53db85e57e2d20fea0c
+      CHIPSET: ${{ matrix.chipset }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate packaged guest runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile qa/cachyos-app-v0.1.11/guest_app_qa.py
+          (cd qa/cachyos-app-v0.1.11 && python3 -m unittest -q test_guest_app_qa.py)
+      - name: Install QEMU, KVM and console tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils mtools dosfstools python3-venv libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          python3 -m venv /tmp/devnet-qa-venv
+          /tmp/devnet-qa-venv/bin/pip -q install --disable-pip-version-check PySide6
+          mkdir -p /tmp/devnet-qa/wheels
+          /tmp/devnet-qa-venv/bin/python -m pip download -q --only-binary=:all: --disable-pip-version-check --dest /tmp/devnet-qa/wheels PySide6
+          test "$(find /tmp/devnet-qa/wheels -type f -name '*.whl' | wc -l)" -ge 3
+      - name: Verify authentic CachyOS ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/devnet-qa evidence
+          base='https://iso.cachyos.org/desktop/260809'
+          name='cachyos-desktop-linux-260809.iso'
+          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 1200 "$base/$name.sha256" -o "/tmp/devnet-qa/$name.sha256"
+          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 1200 "$base/$name" -o "/tmp/devnet-qa/$name"
+          (cd /tmp/devnet-qa && sha256sum -c "$name.sha256") | tee evidence/iso-check.txt
+          grep -F "$name: OK" evidence/iso-check.txt
+          echo CACHYOS_REAL_ISO_SHA256_PASS
+      - name: Verify exact application input and prepare disposable transfer disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence /tmp/devnet-qa
+          # GitHub Release asset is preferred; legacy secret URLs remain optional.
+          # GitHub's read-only GITHUB_TOKEN also works if this QA is moved to a private repo.
+          if [ -n "${QA_CANDIDATE_URL:-}" ]; then
+            curl -fsSL --retry 2 --connect-timeout 15 --max-time 1200 "$QA_CANDIDATE_URL" -o /tmp/devnet-qa/candidate.zip
+          elif GH_TOKEN="$GITHUB_TOKEN" gh release download "$QA_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern devnet-cachyos-repair-v0.1.19.zip \
+              --dir /tmp/devnet-qa; then
+            mv /tmp/devnet-qa/devnet-cachyos-repair-v0.1.19.zip /tmp/devnet-qa/candidate.zip
+          else
+            echo 'NOT_TESTED: GitHub Release attachment is missing (upload unchanged v0.1.19 ZIP)' | tee evidence/app-input.txt
+          fi
+          if [ -s /tmp/devnet-qa/candidate.zip ]; then
+            echo "$QA_CANDIDATE_HASH  /tmp/devnet-qa/candidate.zip" | sha256sum -c -
+            python3 -m zipfile -t /tmp/devnet-qa/candidate.zip
+            echo 'APP_EXACT_SHA256_PASS' > evidence/app-input.txt
+          fi
+          # The frozen candidate already contains the known-good v0.1.17 fixture.
+          # A second upload or external download link is unnecessary.
+          truncate -s 650M /tmp/devnet-guest-qa.img
+          mkfs.vfat -F 32 -n DEVNETQA /tmp/devnet-guest-qa.img
+          mmd -i /tmp/devnet-guest-qa.img ::/wheels
+          for whl in /tmp/devnet-qa/wheels/*.whl; do
+            mcopy -i /tmp/devnet-guest-qa.img "$whl" ::/wheels/
+          done
+          mcopy -i /tmp/devnet-guest-qa.img qa/cachyos-app-v0.1.11/guest_app_qa.py ::/guest_app_qa.py
+          if [ -f /tmp/devnet-qa/candidate.zip ]; then
+            mcopy -i /tmp/devnet-guest-qa.img /tmp/devnet-qa/candidate.zip ::/candidate.zip
+          fi
+          if [ -f /tmp/devnet-qa/previous.zip ]; then
+            mcopy -i /tmp/devnet-guest-qa.img /tmp/devnet-qa/previous.zip ::/previous.zip
+          fi
+          cat > /tmp/devnet-guest-run.sh <<'GUEST'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec >/mnt/guest-btrfs-result.txt 2>&1
+          trap 'rc=$?; echo VM_GUEST_SCRIPT_EXIT=$rc; sync' EXIT
+          echo VM_CACHYOS_GUEST_QA_START
+          grep '^PRETTY_NAME=' /etc/os-release
+          uname -r
+          command -v pacman
+          command -v btrfs
+          mkdir -p /var/tmp/devnet-app-qa/mounted
+          image=/var/tmp/devnet-app-qa/snapshot.img
+          truncate -s 512M "$image"
+          mkfs.btrfs -f "$image"
+          mount -o loop "$image" /var/tmp/devnet-app-qa/mounted
+          d=/var/tmp/devnet-app-qa/mounted
+          btrfs subvolume create "$d/@"
+          echo known-good > "$d/@/marker"
+          btrfs subvolume snapshot -r "$d/@" "$d/known-good-ro"
+          echo broken > "$d/@/marker"
+          btrfs subvolume snapshot "$d/known-good-ro" "$d/restored"
+          test "$(cat "$d/restored/marker")" = known-good
+          echo VM_BTRFS_SNAPSHOT_ROLLBACK_PASS
+          umount "$d"
+          echo VM_GUEST_BTRFS_QA_PASS
+          echo VM_APP_QA_START
+          python3 /mnt/guest_app_qa.py || echo VM_APP_QA_SCRIPT_ERROR
+          echo VM_APP_QA_RETURNED
+          GUEST
+          mcopy -i /tmp/devnet-guest-qa.img /tmp/devnet-guest-run.sh ::/run.sh
+          mdir -i /tmp/devnet-guest-qa.img ::/
+      - name: Boot genuine CachyOS and execute guest tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          qemu-system-x86_64 -machine "$CHIPSET",accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file=/tmp/devnet-qa/cachyos-desktop-linux-260809.iso,media=cdrom,if=ide \
+            -drive file=/tmp/devnet-guest-qa.img,format=raw,if=virtio \
+            -boot order=d -vga std -display none -serial file:evidence/serial.log \
+            -monitor unix:/tmp/devnet-qemu-monitor.sock,server=on,wait=off \
+            -daemonize -pidfile /tmp/devnet-qemu.pid
+          sleep 120
+          /tmp/devnet-qa-venv/bin/python - <<'PY'
+          from PySide6.QtGui import QImage
+          import os, socket, time
+          s=socket.socket(socket.AF_UNIX);s.settimeout(10)
+          s.connect('/tmp/devnet-qemu-monitor.sock')
+          try:
+              try:s.recv(4096)
+              except socket.timeout:pass
+              def cmd(line):
+                  s.sendall((line+'\n').encode())
+                  time.sleep(.18)
+                  try:s.recv(8192)
+                  except socket.timeout:pass
+              cmd('screendump '+os.path.abspath('evidence/cachyos-live.ppm'))
+              time.sleep(6)
+              im=QImage('evidence/cachyos-live.ppm')
+              if im.isNull() or not im.save('evidence/cachyos-live.png'):
+                  raise SystemExit('No genuine QEMU framebuffer available')
+              print('REAL_CACHYOS_FRAMEBUFFER',im.width(),im.height())
+              cmd('sendkey ctrl-alt-f3')
+              time.sleep(3)
+              for k in ['r','o','o','t','ret']:
+                  cmd('sendkey '+k)
+              time.sleep(2)
+              mapping={' ':'spc','/':'slash','.':'dot','-':'minus'}
+              def sendline(line):
+                  for c in line:cmd('sendkey '+mapping.get(c,c))
+                  cmd('sendkey ret')
+              sendline('mount /dev/vda /mnt')
+              time.sleep(3)
+              sendline('bash /mnt/run.sh')
+              print('VM_GUEST_qa_started')
+          finally:s.close()
+          PY
+          for attempt in $(seq 1 80); do
+            if mcopy -o -i /tmp/devnet-guest-qa.img ::/app-qa-v0.1.11.json evidence/guest-app-qa.json >/dev/null 2>&1; then
+              if python3 -c 'import json;json.load(open("evidence/guest-app-qa.json"))' 2>/dev/null; then
+                echo 'VM_GUEST_APP_QA_JSON_CAPTURED'
+                break
+              fi
+            fi
+            sleep 10
+          done
+          if ! test -f evidence/guest-app-qa.json; then
+            echo 'NOT_TESTED: guest app report not produced'
+          fi
+          mcopy -o -i /tmp/devnet-guest-qa.img ::/guest-btrfs-result.txt evidence/guest-btrfs-result.txt
+          grep -F 'PRETTY_NAME="CachyOS"' evidence/guest-btrfs-result.txt
+          grep -F 'VM_BTRFS_SNAPSHOT_ROLLBACK_PASS' evidence/guest-btrfs-result.txt
+          grep -F 'VM_GUEST_BTRFS_QA_PASS' evidence/guest-btrfs-result.txt
+          grep -F 'VM_GUEST_SCRIPT_EXIT=0' evidence/guest-btrfs-result.txt
+          test -s evidence/guest-app-qa.json
+          python3 - <<'PY'
+          import json
+          p=json.load(open('evidence/guest-app-qa.json'))
+          assert p['checks']['real_cachyos_guest']['status']=='PASS',p
+          assert p['release_decision']=='BLOCKED',p
+          print('GUEST_APP_QA_REAL_CACHYOS_PASS')
+          for key,val in p['checks'].items():print(key,val['status'])
+          PY
+      - name: Preserve proof and refusal of false approval
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-app-vm-v0.1.11-${{ matrix.chipset }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Enforce exact-build 100 percent release acceptance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s evidence/guest-app-qa.json || { echo 'BLOCKED: no guest QA report'; exit 1; }
+          python3 - <<'PY'
+          import json
+          r=json.load(open('evidence/guest-app-qa.json'))
+          if r['release_decision']!='APPROVED':
+              raise SystemExit('BLOCKED: outstanding VM/app/GRUB/KDE or physical recovery acceptance')
+          print('APPROVED')
+          PY
