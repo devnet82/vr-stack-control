@@ -1,0 +1,230 @@
+name: Devnet Master QA v0.1.6 CachyOS KVM
+on:
+  push:
+    branches:
+      - qa/master-cachyos-vm-gate-v0.1.6
+permissions:
+  contents: read
+jobs:
+  cachyos-live-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Install QEMU, Qt and virtual desktop prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils python3-venv xvfb openbox dbus-x11 dosfstools mtools libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
+          python3 -m venv /tmp/devnet-qa-venv
+          /tmp/devnet-qa-venv/bin/python -m pip install --disable-pip-version-check --quiet PySide6
+          QT_QPA_PLATFORM=offscreen /tmp/devnet-qa-venv/bin/python -c "from PySide6.QtWidgets import QApplication; app=QApplication([]); print('PYSIDE6_OK', app.platformName())"
+          qemu-system-x86_64 --version | head -1
+          test -c /dev/kvm && echo KVM_AVAILABLE=yes
+      - name: Download authentic CachyOS ISO and validate SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/devnet-qa
+          echo "Free space before ISO:"
+          df -h /tmp
+          base=https://iso.cachyos.org/desktop/260809
+          name=cachyos-desktop-linux-260809.iso
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 1200 "$base/$name.sha256" -o "/tmp/devnet-qa/$name.sha256"
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 1200 --progress-bar "$base/$name" -o "/tmp/devnet-qa/$name"
+          cd /tmp/devnet-qa
+          sha256sum -c "$name.sha256"
+          mkdir -p "$GITHUB_WORKSPACE/boot-evidence"
+          echo CACHYOS_OFFICIAL_ISO_SHA256_PASS | tee "$GITHUB_WORKSPACE/boot-evidence/iso-verification.txt"
+      - name: Start CachyOS live ISO in KVM and capture desktop screens
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p boot-evidence
+          sudo chmod 666 /dev/kvm
+          truncate -s 64M /tmp/devnet-guest-qa.img
+          mkfs.vfat -n DEVNETQA /tmp/devnet-guest-qa.img
+          cat >/tmp/devnet-run.sh <<'GUEST_SCRIPT'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec >/mnt/result.txt 2>&1
+          trap 'rc=$?; echo VM_GUEST_SCRIPT_EXIT=$rc; sync' EXIT
+          echo VM_CACHYOS_GUEST_QA_START
+          grep '^PRETTY_NAME=' /etc/os-release || true
+          uname -r
+          command -v btrfs
+          command -v mkfs.btrfs
+          command -v pacman
+          mkdir -p /var/tmp/devnet-qa/mounted
+          img=/var/tmp/devnet-qa/btrfs.img
+          truncate -s 512M "$img"
+          mkfs.btrfs -f "$img"
+          mount -o loop "$img" /var/tmp/devnet-qa/mounted
+          p=/var/tmp/devnet-qa/mounted
+          btrfs subvolume create "$p/@"
+          printf 'known-good' > "$p/@/marker"
+          btrfs subvolume snapshot -r "$p/@" "$p/known-good-ro"
+          printf 'broken' > "$p/@/marker"
+          btrfs subvolume snapshot "$p/known-good-ro" "$p/restored"
+          test "$(cat "$p/restored/marker")" = known-good
+          echo VM_BTRFS_SNAPSHOT_ROLLBACK_PASS
+          umount "$p"
+          echo VM_GUEST_BTRFS_QA_PASS
+          GUEST_SCRIPT
+          mcopy -i /tmp/devnet-guest-qa.img /tmp/devnet-run.sh ::/run.sh
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file=/tmp/devnet-qa/cachyos-desktop-linux-260809.iso,media=cdrom,if=ide \
+            -drive file=/tmp/devnet-guest-qa.img,format=raw,if=virtio \
+            -boot order=d -vga std -display none -serial file:boot-evidence/serial.log \
+            -monitor unix:/tmp/devnet-qemu-monitor.sock,server=on,wait=off \
+            -daemonize -pidfile /tmp/devnet-qemu.pid
+          for mark in 30 120; do
+            if [ "$mark" = 30 ]; then sleep 30; else sleep 90; fi
+            kill -0 "$(cat /tmp/devnet-qemu.pid)"
+            export MARK="$mark"
+            /tmp/devnet-qa-venv/bin/python - <<'PY'
+          import os, socket, time
+          s=socket.socket(socket.AF_UNIX);s.settimeout(10);s.connect('/tmp/devnet-qemu-monitor.sock')
+          try:
+              try:s.recv(4096)
+              except socket.timeout:pass
+              s.sendall(('screendump ' + os.path.abspath('boot-evidence/cachyos-' + os.environ['MARK'] + '.ppm') + '\n').encode())
+              time.sleep(6)
+              try:print(s.recv(2048).decode(errors='replace'))
+              except socket.timeout:pass
+          finally:s.close()
+          from PySide6.QtGui import QImage
+          p='boot-evidence/cachyos-'+os.environ['MARK']
+          im=QImage(p+'.ppm')
+          if im.isNull() or not im.save(p+'.png'):
+              raise SystemExit('Cannot capture QEMU framebuffer')
+          print('QEMU_SCREENSHOT_CAPTURED',p+'.png',im.width(),im.height())
+          PY
+          done
+          echo QEMU_LIVE_BOOT_ATTEMPTED_SCREENSHOTS_AVAILABLE
+          echo 'This alone is not proof of a fully installed, booted KDE guest'
+      - name: Test VM virtual console and command input
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/devnet-qa-venv/bin/python - <<'PY'
+          from PySide6.QtGui import QImage
+          import os, socket, time
+          monitor='/tmp/devnet-qemu-monitor.sock'
+          s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(monitor)
+          try:
+              s.recv(4096)
+              def cmd(scmd):
+                  s.sendall((scmd+'\n').encode())
+                  time.sleep(.16)
+                  try:s.recv(2048)
+                  except socket.timeout:pass
+              def capture(name):
+                  p=os.path.abspath('boot-evidence/'+name)
+                  cmd('screendump '+p+'.ppm')
+                  for _ in range(20):
+                      if os.path.exists(p+'.ppm') and os.path.getsize(p+'.ppm')>0:break
+                      time.sleep(.25)
+                  im=QImage(p+'.ppm')
+                  if im.isNull() or not im.save(p+'.png'):raise SystemExit('Failed to capture '+name)
+                  print('VM_CONSOLE_SCREENSHOT',p+'.png')
+              cmd('sendkey ctrl-alt-f3')
+              time.sleep(3)
+              capture('tty3-before')
+              for key in ['r','o','o','t','ret']:
+                  cmd('sendkey '+key)
+              time.sleep(2)
+              for key in ['u','n','a','m','e','ret']:
+                  cmd('sendkey '+key)
+              time.sleep(2)
+              capture('tty3-after-uname')
+              def sendline(line):
+                  mapping={' ':'spc','/':'slash','.':'dot','-':'minus'}
+                  for c in line:
+                      cmd('sendkey '+mapping.get(c,c))
+                  cmd('sendkey ret')
+              sendline('mount /dev/vda /mnt')
+              time.sleep(2)
+              sendline('bash /mnt/run.sh')
+              time.sleep(9)
+              capture('tty3-after-btrfs')
+              print('GUEST_BTRFS_SCRIPT_LAUNCHED')
+              print('VM_TTY_INPUT_ATTEMPTED')
+          finally:s.close()
+          PY
+      - name: Assert real CachyOS guest BTRFS snapshot rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          mcopy -i /tmp/devnet-guest-qa.img ::/result.txt boot-evidence/guest-btrfs-report.txt
+          cat boot-evidence/guest-btrfs-report.txt
+          grep -F 'VM_BTRFS_SNAPSHOT_ROLLBACK_PASS' boot-evidence/guest-btrfs-report.txt
+          grep -F 'VM_GUEST_BTRFS_QA_PASS' boot-evidence/guest-btrfs-report.txt
+          grep -F 'VM_GUEST_SCRIPT_EXIT=0' boot-evidence/guest-btrfs-report.txt
+          echo CACHYOS_GUEST_BTRFS_SNAPSHOT_ROLLBACK_PASS
+      - name: Record mandatory Master QA v0.1.6 VM gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,re
+          from pathlib import Path
+          version="0.1.6"
+          appsha="435bc2a88a99eef4cd5e85d71d50ca36e3d3f40361efe53db85e57e2d20fea0c"
+          p=Path("boot-evidence")
+          report=(p/"guest-btrfs-report.txt").read_text(errors="replace") if (p/"guest-btrfs-report.txt").is_file() else ""
+          iso=(p/"iso-verification.txt").read_text(errors="replace") if (p/"iso-verification.txt").is_file() else ""
+          checks={}
+          def add(key,good,description):
+              checks[key]={"status":"PASS" if good else "NOT_TESTED","evidence":description}
+          add("authentic_cachyos_live_guest",all(x in report for x in ('PRETTY_NAME="CachyOS"','/usr/bin/pacman','/usr/bin/btrfs','VM_GUEST_SCRIPT_EXIT=0')) and bool(re.search(r'(?m)^\d+\.\d+\.\d+-[^\s]+-cachyos(?:-lts)?$',report)),"Actual guest /etc/os-release, kernel and required commands")
+          add("verified_official_cachyos_iso","CACHYOS_OFFICIAL_ISO_SHA256_PASS" in iso,"sha256sum -c ran in the same GitHub job")
+          add("vm_btrfs_snapshot_rollback",all(x in report for x in ("Create readonly snapshot of","Create snapshot of","VM_BTRFS_SNAPSHOT_ROLLBACK_PASS","VM_GUEST_BTRFS_QA_PASS","VM_GUEST_SCRIPT_EXIT=0")),"BTRFS guest snapshot and restored marker from a disposable loop image")
+          png=p/"cachyos-120.png"
+          add("vm_framebuffer_capture",png.is_file() and png.stat().st_size>1024 and png.open("rb").read(8)==bytes.fromhex("89504e470d0a1a0a"),"Captured QEMU framebuffer, not app GUI acceptance")
+          candidate=Path("devnet-cachyos-repair-v0.1.19.zip")
+          add("exact_candidate_archive",candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest()==appsha,"SHA-256 of exact v0.1.19 ZIP")
+          for key,why in {
+          "vm_app_install_uninstall":"Application install/uninstall inside guest never executed",
+          "vm_app_pyside6_desktop":"33 PySide6 acceptance scenarios not run inside guest",
+          "vm_app_upgrade_rollback":"Historical upgrade and rollback not run inside guest",
+          "vm_app_doctors_recovery":"Boot/Pre-Update/Guided repair not run inside guest",
+          "vm_installed_grub_btrfs_reboot":"Live ISO guest is not an installed/rebooted GRUB guest",
+          "vm_kwin_wayland_x11":"Actual KWin sessions not verified",
+          "vm_multi_hardware_portability":"Additional hardware profiles not tested",
+          "physical_recovery":"Physical machine bootloader/storage recovery not tested",
+          "independent_evidence_review":"Human build-specific review and release sign-off not completed"
+          }.items():
+              checks[key]={"status":"NOT_TESTED","evidence":why}
+          status="APPROVED" if checks and all(x["status"]=="PASS" for x in checks.values()) else "BLOCKED"
+          out={"gate_version":version,"schema":"devnet-cachyos-master-vm-qa-v1","application_version":"0.1.19","expected_app_sha256":appsha,"github_run_url":os.environ.get("GITHUB_SERVER_URL","")+"/"+os.environ.get("GITHUB_REPOSITORY","")+"/actions/runs/"+os.environ.get("GITHUB_RUN_ID",""),"checks":checks,"master_qa_decision":status,"note":"MANDATORY companion to 79-item v0.1.3 Master QA. Passing basic VM smoke cannot approve app or physical recovery."}
+          p.mkdir(exist_ok=True)
+          (p/"master-qa-v0.1.6.json").write_text(json.dumps(out,indent=2,sort_keys=True)+"\n")
+          print("MASTER_QA_VM_GATE_"+status)
+          for k,v in checks.items(): print("["+v["status"]+"]",k,":",v["evidence"])
+          PY
+      - name: Preserve boot evidence for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-master-qa-v0.1.6-evidence
+          path: boot-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Enforce 100 percent Master QA release gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path("boot-evidence/master-qa-v0.1.6.json")
+          if not p.is_file(): raise SystemExit("BLOCKED: Mandatory VM gate report missing")
+          result=json.loads(p.read_text())
+          if result["master_qa_decision"]!="APPROVED":
+              raise SystemExit("BLOCKED: Mandatory Master QA scenarios remain NOT_TESTED; see the uploaded JSON evidence")
+          print("MASTER_QA_APPROVED")
+          PY
