@@ -1,0 +1,28 @@
+name: Devnet Qt XCB runtime dependency v0.1.0
+on:
+  push:
+    branches: [qa/qt-xcb-runtime-v0.1.0]
+permissions:
+  contents: read
+jobs:
+  export-xcb-cursor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Download redistributable Ubuntu libxcb-cursor0 runtime package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packages
+          cd packages
+          apt download libxcb-cursor0
+          test "$(find . -name 'libxcb-cursor0_*.deb' | wc -l)" -eq 1
+          sha256sum ./*.deb > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+      - name: Upload runtime dependency only
+        uses: actions/upload-artifact@v4
+        with:
+          name: devnet-qt-xcb-cursor-runtime-v0.1.0
+          path: packages/
+          retention-days: 7
+          if-no-files-found: error
