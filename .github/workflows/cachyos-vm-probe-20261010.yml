@@ -56,8 +56,8 @@ jobs:
           try:
               try:s.recv(4096)
               except socket.timeout:pass
-              s.sendall(('screendump boot-evidence/cachyos-'+os.environ['MARK']+'.ppm\n').encode())
-              time.sleep(2)
+              s.sendall(('screendump ' + os.path.abspath('boot-evidence/cachyos-' + os.environ['MARK'] + '.ppm') + '\n').encode())
+              time.sleep(6)
               try:print(s.recv(2048).decode(errors='replace'))
               except socket.timeout:pass
           finally:s.close()
