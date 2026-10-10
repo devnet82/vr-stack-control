@@ -17,7 +17,7 @@ jobs:
           echo "RUNNER=$(uname -s -m)"
           python3 --version
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils python3-venv xvfb openbox dbus-x11
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils python3-venv xvfb openbox dbus-x11 libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
           python3 -m venv /tmp/devnet-qa-venv
           /tmp/devnet-qa-venv/bin/python -m pip install --disable-pip-version-check --quiet PySide6
           /tmp/devnet-qa-venv/bin/python -c "from PySide6.QtWidgets import QApplication, QLabel; app=QApplication([]); print('PYSIDE6_OK', app.platformName())" 
