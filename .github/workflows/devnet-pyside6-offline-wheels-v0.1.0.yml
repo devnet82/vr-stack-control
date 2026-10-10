@@ -1,0 +1,28 @@
+name: Devnet PySide6 offline dependency QA v0.1.0
+on:
+  push:
+    branches: [qa/pyside6-wheels-v0.1.0]
+permissions:
+  contents: read
+jobs:
+  wheel-export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Obtain exact PySide6 Essentials wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/devnet-wheel-venv
+          mkdir -p wheels
+          /tmp/devnet-wheel-venv/bin/python -m pip download --only-binary=:all: --dest wheels PySide6_Essentials shiboken6
+          test "$(find wheels -maxdepth 1 -name '*.whl' | wc -l)" -ge 2
+          (cd wheels && sha256sum ./*.whl > SHA256SUMS.txt)
+          cat wheels/SHA256SUMS.txt
+      - name: Upload publicly redistributable Python wheels (not app source)
+        uses: actions/upload-artifact@v4
+        with:
+          name: devnet-pyside6-offline-wheels-v0.1.0
+          path: wheels/
+          retention-days: 7
+          if-no-files-found: error
