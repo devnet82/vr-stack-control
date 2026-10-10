@@ -6,29 +6,76 @@ on:
 permissions:
   contents: read
 jobs:
-  vm-prerequisites:
+  cachyos-live-boot:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
-      - name: Inspect runner and download dependencies
+      - name: Install QEMU, Qt and virtual desktop prerequisites
         shell: bash
         run: |
           set -euo pipefail
-          echo "RUNNER=$(uname -s -m)"
-          python3 --version
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils python3-venv xvfb openbox dbus-x11 libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
           python3 -m venv /tmp/devnet-qa-venv
           /tmp/devnet-qa-venv/bin/python -m pip install --disable-pip-version-check --quiet PySide6
-          /tmp/devnet-qa-venv/bin/python -c "from PySide6.QtWidgets import QApplication, QLabel; app=QApplication([]); print('PYSIDE6_OK', app.platformName())" 
-        env:
-          QT_QPA_PLATFORM: offscreen
-      - name: Verify emulator and desktop prerequisites
+          QT_QPA_PLATFORM=offscreen /tmp/devnet-qa-venv/bin/python -c "from PySide6.QtWidgets import QApplication; app=QApplication([]); print('PYSIDE6_OK', app.platformName())"
+          qemu-system-x86_64 --version | head -1
+          test -c /dev/kvm && echo KVM_AVAILABLE=yes
+      - name: Download authentic CachyOS ISO and validate SHA256
         shell: bash
         run: |
           set -euo pipefail
-          qemu-system-x86_64 --version | head -1
-          qemu-img --version | head -1
-          test -c /dev/kvm && echo 'KVM_AVAILABLE=yes' || echo 'KVM_AVAILABLE=no; TCG can still emulate'
-          xvfb-run -a bash -c 'command -v openbox && command -v dbus-run-session && echo VIRTUAL_DESKTOP_READY=yes'
-          echo "GITHUB_HOSTED_VM_PREREQUISITES_PASS"
+          mkdir -p /tmp/devnet-qa
+          echo "Free space before ISO:"
+          df -h /tmp
+          base=https://iso.cachyos.org/desktop/260809
+          name=cachyos-desktop-linux-260809.iso
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 1200 "$base/$name.sha256" -o "/tmp/devnet-qa/$name.sha256"
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 1200 --progress-bar "$base/$name" -o "/tmp/devnet-qa/$name"
+          cd /tmp/devnet-qa
+          sha256sum -c "$name.sha256"
+          echo CACHYOS_OFFICIAL_ISO_SHA256_PASS
+      - name: Start CachyOS live ISO in KVM and capture desktop screens
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p boot-evidence
+          sudo chmod 666 /dev/kvm
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file=/tmp/devnet-qa/cachyos-desktop-linux-260809.iso,media=cdrom,if=ide \
+            -boot order=d -vga std -display none -serial file:boot-evidence/serial.log \
+            -monitor unix:/tmp/devnet-qemu-monitor.sock,server=on,wait=off \
+            -daemonize -pidfile /tmp/devnet-qemu.pid
+          for mark in 30 120; do
+            if [ "$mark" = 30 ]; then sleep 30; else sleep 90; fi
+            kill -0 "$(cat /tmp/devnet-qemu.pid)"
+            export MARK="$mark"
+            /tmp/devnet-qa-venv/bin/python - <<'PY'
+          import os, socket, time
+          s=socket.socket(socket.AF_UNIX);s.settimeout(10);s.connect('/tmp/devnet-qemu-monitor.sock')
+          try:
+              try:s.recv(4096)
+              except socket.timeout:pass
+              s.sendall(('screendump boot-evidence/cachyos-'+os.environ['MARK']+'.ppm\n').encode())
+              time.sleep(2)
+              try:print(s.recv(2048).decode(errors='replace'))
+              except socket.timeout:pass
+          finally:s.close()
+          from PySide6.QtGui import QImage
+          p='boot-evidence/cachyos-'+os.environ['MARK']
+          im=QImage(p+'.ppm')
+          if im.isNull() or not im.save(p+'.png'):
+              raise SystemExit('Cannot capture QEMU framebuffer')
+          print('QEMU_SCREENSHOT_CAPTURED',p+'.png',im.width(),im.height())
+          PY
+          done
+          echo QEMU_LIVE_BOOT_ATTEMPTED_SCREENSHOTS_AVAILABLE
+          echo 'This alone is not proof of a fully installed, booted KDE guest'
+      - name: Preserve boot evidence for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-kvm-boot-evidence
+          path: boot-evidence/
+          if-no-files-found: warn
+          retention-days: 7
