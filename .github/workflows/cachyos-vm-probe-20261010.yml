@@ -71,6 +71,44 @@ jobs:
           done
           echo QEMU_LIVE_BOOT_ATTEMPTED_SCREENSHOTS_AVAILABLE
           echo 'This alone is not proof of a fully installed, booted KDE guest'
+      - name: Test VM virtual console and command input
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/devnet-qa-venv/bin/python - <<'PY'
+          from PySide6.QtGui import QImage
+          import os, socket, time
+          monitor='/tmp/devnet-qemu-monitor.sock'
+          s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(monitor)
+          try:
+              s.recv(4096)
+              def cmd(scmd):
+                  s.sendall((scmd+'\n').encode())
+                  time.sleep(.16)
+                  try:s.recv(2048)
+                  except socket.timeout:pass
+              def capture(name):
+                  p=os.path.abspath('boot-evidence/'+name)
+                  cmd('screendump '+p+'.ppm')
+                  for _ in range(20):
+                      if os.path.exists(p+'.ppm') and os.path.getsize(p+'.ppm')>0:break
+                      time.sleep(.25)
+                  im=QImage(p+'.ppm')
+                  if im.isNull() or not im.save(p+'.png'):raise SystemExit('Failed to capture '+name)
+                  print('VM_CONSOLE_SCREENSHOT',p+'.png')
+              cmd('sendkey ctrl-alt-f3')
+              time.sleep(3)
+              capture('tty3-before')
+              for key in ['r','o','o','t','ret']:
+                  cmd('sendkey '+key)
+              time.sleep(2)
+              for key in ['u','n','a','m','e','ret']:
+                  cmd('sendkey '+key)
+              time.sleep(2)
+              capture('tty3-after-uname')
+              print('VM_TTY_INPUT_ATTEMPTED')
+          finally:s.close()
+          PY
       - name: Preserve boot evidence for inspection
         if: always()
         uses: actions/upload-artifact@v4
