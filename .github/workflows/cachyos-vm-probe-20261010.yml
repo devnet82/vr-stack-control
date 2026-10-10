@@ -15,7 +15,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils python3-venv xvfb openbox dbus-x11 libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
+          sudo apt-get install -y -qq --no-install-recommends qemu-system-x86 qemu-utils python3-venv xvfb openbox dbus-x11 dosfstools mtools libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
           python3 -m venv /tmp/devnet-qa-venv
           /tmp/devnet-qa-venv/bin/python -m pip install --disable-pip-version-check --quiet PySide6
           QT_QPA_PLATFORM=offscreen /tmp/devnet-qa-venv/bin/python -c "from PySide6.QtWidgets import QApplication; app=QApplication([]); print('PYSIDE6_OK', app.platformName())"
@@ -41,8 +41,39 @@ jobs:
           set -euo pipefail
           mkdir -p boot-evidence
           sudo chmod 666 /dev/kvm
+          truncate -s 64M /tmp/devnet-guest-qa.img
+          mkfs.vfat -n DEVNETQA /tmp/devnet-guest-qa.img
+          cat >/tmp/devnet-run.sh <<'GUEST_SCRIPT'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec >/mnt/result.txt 2>&1
+          trap 'rc=$?; echo VM_GUEST_SCRIPT_EXIT=$rc; sync' EXIT
+          echo VM_CACHYOS_GUEST_QA_START
+          grep '^PRETTY_NAME=' /etc/os-release || true
+          uname -r
+          command -v btrfs
+          command -v mkfs.btrfs
+          command -v pacman
+          mkdir -p /var/tmp/devnet-qa/mounted
+          img=/var/tmp/devnet-qa/btrfs.img
+          truncate -s 512M "$img"
+          mkfs.btrfs -f "$img"
+          mount -o loop "$img" /var/tmp/devnet-qa/mounted
+          p=/var/tmp/devnet-qa/mounted
+          btrfs subvolume create "$p/@"
+          printf 'known-good' > "$p/@/marker"
+          btrfs subvolume snapshot -r "$p/@" "$p/known-good-ro"
+          printf 'broken' > "$p/@/marker"
+          btrfs subvolume snapshot "$p/known-good-ro" "$p/restored"
+          test "$(cat "$p/restored/marker")" = known-good
+          echo VM_BTRFS_SNAPSHOT_ROLLBACK_PASS
+          umount "$p"
+          echo VM_GUEST_BTRFS_QA_PASS
+          GUEST_SCRIPT
+          mcopy -i /tmp/devnet-guest-qa.img /tmp/devnet-run.sh ::/run.sh
           qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
             -drive file=/tmp/devnet-qa/cachyos-desktop-linux-260809.iso,media=cdrom,if=ide \
+            -drive file=/tmp/devnet-guest-qa.img,format=raw,if=virtio \
             -boot order=d -vga std -display none -serial file:boot-evidence/serial.log \
             -monitor unix:/tmp/devnet-qemu-monitor.sock,server=on,wait=off \
             -daemonize -pidfile /tmp/devnet-qemu.pid
@@ -106,9 +137,30 @@ jobs:
                   cmd('sendkey '+key)
               time.sleep(2)
               capture('tty3-after-uname')
+              def sendline(line):
+                  mapping={' ':'spc','/':'slash','.':'dot','-':'minus'}
+                  for c in line:
+                      cmd('sendkey '+mapping.get(c,c))
+                  cmd('sendkey ret')
+              sendline('mount /dev/vda /mnt')
+              time.sleep(2)
+              sendline('bash /mnt/run.sh')
+              time.sleep(9)
+              capture('tty3-after-btrfs')
+              print('GUEST_BTRFS_SCRIPT_LAUNCHED')
               print('VM_TTY_INPUT_ATTEMPTED')
           finally:s.close()
           PY
+      - name: Assert real CachyOS guest BTRFS snapshot rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          mcopy -i /tmp/devnet-guest-qa.img ::/result.txt boot-evidence/guest-btrfs-report.txt
+          cat boot-evidence/guest-btrfs-report.txt
+          grep -F 'VM_BTRFS_SNAPSHOT_ROLLBACK_PASS' boot-evidence/guest-btrfs-report.txt
+          grep -F 'VM_GUEST_BTRFS_QA_PASS' boot-evidence/guest-btrfs-report.txt
+          grep -F 'VM_GUEST_SCRIPT_EXIT=0' boot-evidence/guest-btrfs-report.txt
+          echo CACHYOS_GUEST_BTRFS_SNAPSHOT_ROLLBACK_PASS
       - name: Preserve boot evidence for inspection
         if: always()
         uses: actions/upload-artifact@v4
