@@ -1,0 +1,157 @@
+{
+  "job_id": "vr-stack-v06132",
+  "candidate": "qa/application/jobs/vr-stack-v06132/candidate.zip",
+  "sha256": "04118623d828de96526e1c185409c586bf9ed1b4b1318451e4301277ff69baf1",
+  "checks": [
+    {
+      "id": "github_zip_integrity",
+      "stage": "github",
+      "argv": [
+        "python3",
+        "../../candidate_checks.py",
+        "integrity",
+        "candidate.zip"
+      ]
+    },
+    {
+      "id": "github_archive_safety",
+      "stage": "github",
+      "argv": [
+        "python3",
+        "../../candidate_checks.py",
+        "safety",
+        "candidate.zip"
+      ]
+    },
+    {
+      "id": "github_python_syntax",
+      "stage": "github",
+      "argv": [
+        "python3",
+        "../../candidate_checks.py",
+        "python_syntax",
+        "candidate.zip"
+      ]
+    },
+    {
+      "id": "package_integrity",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "source_integrity",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "script_syntax",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "tray_lock",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "package_python_tests",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "package_shell_tests",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "gui_process_smoke",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "tray_process_smoke",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "gui_tab_navigation",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "gui_clean_close",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "tray_menu_wiring",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "gui_sidebar_activation",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "gui_pointer_navigation",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "install",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "upgrade",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "rollback",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "gui",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "tray",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "recovery",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "security",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "real_service_lifecycle",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "tray_icon_visibility",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "tray_menu_pointer",
+      "stage": "vm",
+      "argv": []
+    },
+    {
+      "id": "failure_injection",
+      "stage": "vm",
+      "argv": []
+    }
+  ]
+}
