@@ -5,9 +5,12 @@ on:
     paths:
       - 'qa/master/devnet-master-qa-unified-v0.3.8-QA-BLOCKED.zip'
       - 'qa/master/MASTER_QA_WEB_RESEARCH_REQUIREMENT.md'
+      - '.github/workflows/devnet-master-qa-github-first.yml'
   workflow_dispatch:
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 jobs:
   validate-candidate:
     runs-on: ubuntu-24.04
@@ -35,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, pathlib, re, subprocess, sys, tempfile, zipfile
+          import hashlib, json, os, pathlib, re, subprocess, sys, tempfile, zipfile
           expected = 'de83312d81636c8f92802060fc516188dc46b62b6d246bf6cc3d2361f0a1500c'
           package = pathlib.Path('qa/master/devnet-master-qa-unified-v0.3.8-QA-BLOCKED.zip')
           assert package.is_file(), 'BLOCKED: expected exact candidate ZIP missing'
@@ -66,9 +69,61 @@ jobs:
               print(p.stderr[-20000:],flush=True)
               assert p.returncode == 0, f'BLOCKED: 179-test suite returned {p.returncode}'
               assert re.search(r'Ran 179 tests in',p.stderr), 'BLOCKED: incomplete QA suite'
+              receipt = {
+                  'schema':'devnet-github-stage-receipt-v1',
+                  'stage':'github','scope':'master-v0.3.8-bundled-python-regressions',
+                  'zip_path':str(package),'zip_sha256':expected,
+                  'test_count':179,'status':'PASS','exit_code':p.returncode,
+                  'source_commit_sha':os.environ['GITHUB_SHA'],
+                  'github_run_id':os.environ['GITHUB_RUN_ID'],
+                  'github_run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+                  'release_approved':False,'trusted_vm_or_host':False}
+              pathlib.Path('qa-master-ci-receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')
               print('GH_MASTER_WEB_RESEARCH_TEST_EXIT=0', flush=True)
           PY
+      - name: Sign exact tested Master QA ZIP provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: qa/master/devnet-master-qa-unified-v0.3.8-QA-BLOCKED.zip
+      - name: Sign exact GitHub test receipt
+        uses: actions/attest@v4
+        with:
+          subject-path: qa-master-ci-receipt.json
+      - name: Preserve GitHub test receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: devnet-master-v038-github-stage-receipt
+          path: qa-master-ci-receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Record result
         if: always()
         run: |
           echo 'Full Master QA remains BLOCKED until VM, host and trusted execution evidence pass.' >> "$GITHUB_STEP_SUMMARY"
+
+  verify-master-provenance:
+    needs: validate-candidate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devnet-master-v038-github-stage-receipt
+      - name: Verify independent GitHub signature and exact source commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify qa-master-ci-receipt.json --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/devnet-master-qa-github-first.yml" --source-digest "$GITHUB_SHA"
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          r=json.loads(Path('qa-master-ci-receipt.json').read_text())
+          assert r['source_commit_sha']==os.environ['GITHUB_SHA'] and r['github_run_id']==os.environ['GITHUB_RUN_ID']
+          assert r['stage']=='github' and r['test_count']==179 and r['status']=='PASS' and r['exit_code']==0
+          assert r['release_approved'] is False and r['trusted_vm_or_host'] is False
+          print('GITHUB_SIGNED_MASTER_STAGE: VERIFIED_SCOPE_LIMITED')
+          PY
