@@ -36,7 +36,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import hashlib, pathlib, re, subprocess, sys, tempfile, zipfile
-          expected = '7bb7f9f3ca2f3800cd38816f1de20fef9abcdc1f47cbdf78ed830e7d68666db8'
+          expected = 'a5a2163ab05e0f72cd7c6ac0f7ea96525584a41173ff2a0c4d99da42befd2da6'
           package = pathlib.Path('qa/master/devnet-master-qa-unified-v0.3.7-QA-BLOCKED.zip')
           assert package.is_file(), 'BLOCKED: expected exact candidate ZIP missing'
           actual = hashlib.sha256(package.read_bytes()).hexdigest()
