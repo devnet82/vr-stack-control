@@ -9,6 +9,7 @@ on:
       - 'qa/application/v0685_installed_lifecycle.py'
       - 'qa/application/guest_v0685_package.py'
       - 'qa/application/guest_v0685_lifecycle.py'
+      - 'qa/application/v0685_stage_gate.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -203,3 +204,89 @@ jobs:
         run: |
           echo 'A live CachyOS ISO guest is NOT an installed CachyOS KDE application acceptance environment.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Install/upgrade/rollback, genuine KDE GUI/tray and physical host hardware remain NOT_TESTED; release BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  sign-v0685-native-scope:
+    needs: [exact-candidate-baseline, native-cachyos-liveiso]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-original-github-input-and-structure
+          path: original-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: fullapp-v0685-native-cachyos-liveiso-evidence
+          path: native-evidence
+      - name: Independently verify every in-scope real executed check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 qa/application/v0685_stage_gate.py \
+            original-input/candidate.zip \
+            original-input/disposable-lifecycle/lifecycle-receipt.json \
+            native-evidence/qa-result.json \
+            native-evidence/lifecycle-result.json \
+            native-evidence/verified-scope.json
+      - uses: actions/attest@v4
+        with:
+          subject-path: original-input/candidate.zip
+      - uses: actions/attest@v4
+        with:
+          subject-path: native-evidence/verified-scope.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v0685-signed-liveiso-scope-receipt
+          path: native-evidence/verified-scope.json
+          retention-days: 90
+          if-no-files-found: error
+      - name: Preserve release gate
+        run: echo 'Signed evidence is ONLY for historical v0.6.85 Ubuntu and CachyOS LIVE ISO. Full Master QA BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  independent-v0685-provenance-verification:
+    needs: sign-v0685-native-scope
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-original-github-input-and-structure
+          path: original-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-signed-liveiso-scope-receipt
+          path: signed-evidence
+      - name: Verify exact original application and source-bound test receipt signatures
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow="$GITHUB_REPOSITORY/.github/workflows/devnet-fullapp-v0685-github-first.yml"
+          gh attestation verify original-input/candidate.zip --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$workflow" --source-digest "$GITHUB_SHA"
+          gh attestation verify signed-evidence/verified-scope.json --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$workflow" --source-digest "$GITHUB_SHA"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          d=json.loads(pathlib.Path("signed-evidence/verified-scope.json").read_text())
+          z=pathlib.Path("original-input/candidate.zip")
+          assert hashlib.sha256(z.read_bytes()).hexdigest()==d["candidate_sha256"]
+          assert d["github_sha"]==os.environ["GITHUB_SHA"]
+          assert d["github_run_id"]==os.environ["GITHUB_RUN_ID"]
+          assert (d["ubuntu_disposable_install_pass"],
+                  d["real_cachyos_liveiso_package_pass"],
+                  d["real_cachyos_liveiso_lifecycle_pass"]) == (9,9,8)
+          assert d["decision"]=="PASS_LIMITED"
+          assert d["full_master_qa"]=="BLOCKED"
+          assert d["release_approved"] is False
+          print("SIGNED_GITHUB_NATIVE_LIVEISO: VERIFIED_SCOPE_LIMITED")
+          PY
+          echo 'SIGNED LIVE ISO scope verified independently; FULL MASTER QA BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
