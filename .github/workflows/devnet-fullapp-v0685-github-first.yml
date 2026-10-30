@@ -57,3 +57,123 @@ jobs:
         run: |
           echo 'Original full-app ZIP integrity and Ubuntu disposable-home install/reinstall/uninstall checks only.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Real GitHub-hosted CachyOS install/upgrade/rollback/GUI and user VM/host checks NOT_TESTED. RELEASE BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  native-cachyos-liveiso:
+    needs: exact-candidate-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-original-github-input-and-structure
+          path: original-input
+      - name: Verify exact v0.6.85 artifact and disposable KVM capabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3  original-input/candidate.zip' | sha256sum -c -
+          test -c /dev/kvm
+          test -r /dev/kvm -a -w /dev/kvm
+          echo 'GITHUB_HOST_KVM_AVAILABLE (not yet a guest test)'
+      - name: Install isolated QEMU and FAT-disk tools on GitHub runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends qemu-system-x86 qemu-utils mtools dosfstools
+      - name: Prepare independently verified CachyOS ISO and pinned guest harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-evidence /tmp/devnet-native-v0685
+          base=https://iso.cachyos.org/desktop/260809
+          name=cachyos-desktop-linux-260809.iso
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 \
+            "$base/$name.sha256" -o "/tmp/devnet-native-v0685/$name.sha256"
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 \
+            "$base/$name" -o "/tmp/devnet-native-v0685/$name"
+          (cd /tmp/devnet-native-v0685 && sha256sum -c "$name.sha256") | tee native-evidence/iso-sha256.txt
+          root="https://raw.githubusercontent.com/devnet82/devnet-cachyos-repair/d8e4447d19e77a77dc355dc07e72c0c5c3edf741/qa/portfolio-cachyos-vm-v0.1.0"
+          curl -fLsS "$root/guest_package_qa.py" -o /tmp/devnet-native-v0685/guest_package_qa.py
+          curl -fLsS "$root/qemu_control.py" -o /tmp/devnet-native-v0685/qemu_control.py
+          python3 -m py_compile /tmp/devnet-native-v0685/guest_package_qa.py /tmp/devnet-native-v0685/qemu_control.py
+          truncate -s 128M /tmp/devnet-native-v0685/control.img
+          mkfs.vfat -F 32 -n DEVNETQA /tmp/devnet-native-v0685/control.img >/dev/null
+          img=/tmp/devnet-native-v0685/control.img
+          mcopy -i "$img" /tmp/devnet-native-v0685/guest_package_qa.py ::/guest_package_qa.py
+          mcopy -i "$img" original-input/candidate.zip ::/candidate.zip
+          cat > /tmp/devnet-native-v0685/run-guest.sh <<'GUEST'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec >/mnt/controller.log 2>&1
+          trap 'rc=$?; echo VM_GUEST_CONTROLLER_EXIT=$rc; sync' EXIT
+          echo "DEVNET_NATIVE_CACHYOS_ORIGINAL_v0685_QA_START"
+          cat /etc/os-release
+          uname -r
+          python3 /mnt/guest_package_qa.py /mnt/candidate.zip \
+            db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3 \
+            0.6.85 /mnt/qa-result.json /mnt/package-tests.log
+          GUEST
+          bash -n /tmp/devnet-native-v0685/run-guest.sh
+          mcopy -i "$img" /tmp/devnet-native-v0685/run-guest.sh ::/install-guest.sh
+          mdir -i "$img" ::/ > native-evidence/control-manifest.txt
+      - name: Boot genuine CachyOS LIVE ISO in isolated QEMU and capture checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/devnet-native-v0685
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file="$root/cachyos-desktop-linux-260809.iso",media=cdrom,if=ide \
+            -drive if=none,id=ctl,file="$root/control.img",format=raw \
+            -device virtio-blk-pci,drive=ctl,serial=DEVNETCONTROL \
+            -nic none -boot order=d -vga std -display none \
+            -serial file:native-evidence/serial.log \
+            -monitor unix:"$root/qemu-monitor.sock",server=on,wait=off \
+            -daemonize -pidfile "$root/qemu.pid"
+          sleep 110
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" framebuffer \
+            --image native-evidence/guest-before-tests.ppm
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" begin-install
+          captured=0
+          for attempt in $(seq 1 75); do
+            mcopy -o -i "$root/control.img" ::/controller.log native-evidence/controller.log >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/package-tests.log native-evidence/package-tests.log >/dev/null 2>&1 || true
+            if mcopy -o -i "$root/control.img" ::/qa-result.json native-evidence/qa-result.json >/dev/null 2>&1; then
+              if python3 -c 'import json; json.load(open("native-evidence/qa-result.json"))' 2>/dev/null; then
+                captured=1
+                break
+              fi
+            fi
+            sleep 8
+          done
+          test "$captured" -eq 1
+          python3 - <<'PY'
+          import json
+          r=json.load(open("native-evidence/qa-result.json"))
+          assert r["format"]=="devnet-native-cachyos-vm-qa-v0.1.0"
+          required=["native_cachyos","control_disk_identity","exact_sha256",
+                    "zip_integrity","package_version","native_syntax"]
+          for check in required:
+              print("CACHYOS_GUEST",check,r["checks"].get(check))
+              assert r["checks"][check]["status"]=="PASS", check
+          assert r["release_decision"]=="BLOCKED"
+          assert r["overall"]=="PARTIAL"  # Installed OS/GUI remain unverified
+          print("LIVE_CACHYOS_PACKAGE_GUEST: PASS_LIMITED; MASTER_QA: BLOCKED")
+          PY
+      - name: Preserve authentic native guest evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullapp-v0685-native-cachyos-liveiso-evidence
+          path: native-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Enforce precise stage scope
+        if: always()
+        run: |
+          echo 'A live CachyOS ISO guest is NOT an installed CachyOS KDE application acceptance environment.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Install/upgrade/rollback, genuine KDE GUI/tray and physical host hardware remain NOT_TESTED; release BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
