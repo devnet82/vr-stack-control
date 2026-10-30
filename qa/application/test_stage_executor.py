@@ -32,7 +32,9 @@ class RestrictedStageExecution(unittest.TestCase):
                          "candidate":"qa/application/jobs/demo/candidate.zip",
                          "sha256":gate.sha256(self.candidate), "checks":checks}
         (self.job/"manifest.json").write_text(json.dumps(self.manifest))
-        (self.job/"manifest.sig").write_text("fixture-untrusted")
+        (self.job/"policy.json").write_text(json.dumps({
+            "schema":"devnet-qa-checklist-v1","job_id":"demo","checks":checks}))
+        (self.job/"policy.sig").write_text("fixture-untrusted")
         self.sha = "a" * 40
         receipt = {"schema":1,"job_id":"demo",
                    "candidate_sha256":self.manifest["sha256"],
