@@ -35,12 +35,14 @@ class StageChain(unittest.TestCase):
                          "checks": checks}
         self.save_manifest()
         self.source = "a" * 40
-        self.privates = {s: Ed25519PrivateKey.generate() for s in ("vm", "host")}
+        self.privates = {s: Ed25519PrivateKey.generate() for s in ("operator", "vm", "host")}
         for stage, key in self.privates.items():
             (self.trust / (stage + ".pub")).write_bytes(
                 key.public_key().public_bytes(
                     encoding=serialization.Encoding.PEM,
                     format=serialization.PublicFormat.SubjectPublicKeyInfo))
+        (self.job / "manifest.sig").write_bytes(
+            self.privates["operator"].sign((self.job / "manifest.json").read_bytes()))
         self.make_github()
         self.make_signed_stages()
 
@@ -179,6 +181,12 @@ class StageChain(unittest.TestCase):
 
     def test_unsigned_host_pass_cannot_advance(self):
         (self.evidence / "host" / "receipt.sig").write_bytes(b"fake-signature")
+        with self.assertRaises(Exception):
+            self.assess()
+
+    def test_unsigned_scope_change_is_blocked(self):
+        self.manifest["checks"] = self.manifest["checks"][:-1]
+        self.save_manifest()
         with self.assertRaises(Exception):
             self.assess()
 
