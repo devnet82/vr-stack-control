@@ -7,6 +7,12 @@ on:
       - 'qa/application/**'
       - '.github/workflows/devnet-coordinator-regressions.yml'
   workflow_dispatch:
+  pull_request:
+    branches:
+      - qa/master-unified-v0.2.4-github-first
+    paths:
+      - 'qa/application/**'
+      - '.github/workflows/devnet-coordinator-regressions.yml'
 permissions:
   contents: read
 jobs:
