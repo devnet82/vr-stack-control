@@ -113,6 +113,8 @@ jobs:
           mkfs.vfat -F 32 -n DEVNETQA /tmp/devnet-native-v0685/control.img >/dev/null
           img=/tmp/devnet-native-v0685/control.img
           mcopy -i "$img" /tmp/devnet-native-v0685/guest_package_qa.py ::/guest_package_qa.py
+          python3 -m py_compile qa/application/guest_v0685_lifecycle.py
+          mcopy -i "$img" qa/application/guest_v0685_lifecycle.py ::/guest_v0685_lifecycle.py
           mcopy -i "$img" original-input/candidate.zip ::/candidate.zip
           cat > /tmp/devnet-native-v0685/run-guest.sh <<'GUEST'
           #!/usr/bin/env bash
@@ -125,6 +127,8 @@ jobs:
           python3 /mnt/guest_package_qa.py /mnt/candidate.zip \
             db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3 \
             0.6.85 /mnt/qa-result.json /mnt/package-tests.log
+          python3 /mnt/guest_v0685_lifecycle.py /mnt/candidate.zip \
+            /mnt/lifecycle-result.json /mnt/lifecycle-tests.log
           GUEST
           bash -n /tmp/devnet-native-v0685/run-guest.sh
           mcopy -i "$img" /tmp/devnet-native-v0685/run-guest.sh ::/install-guest.sh
@@ -150,6 +154,8 @@ jobs:
           for attempt in $(seq 1 75); do
             mcopy -o -i "$root/control.img" ::/controller.log native-evidence/controller.log >/dev/null 2>&1 || true
             mcopy -o -i "$root/control.img" ::/package-tests.log native-evidence/package-tests.log >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/lifecycle-result.json native-evidence/lifecycle-result.json >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/lifecycle-tests.log native-evidence/lifecycle-tests.log >/dev/null 2>&1 || true
             if mcopy -o -i "$root/control.img" ::/qa-result.json native-evidence/qa-result.json >/dev/null 2>&1; then
               if python3 -c 'import json; json.load(open("native-evidence/qa-result.json"))' 2>/dev/null; then
                 captured=1
@@ -170,6 +176,16 @@ jobs:
               assert r["checks"][check]["status"]=="PASS", check
           assert r["release_decision"]=="BLOCKED"
           assert r["overall"]=="PARTIAL"  # Installed OS/GUI remain unverified
+          lifecycle=json.load(open("native-evidence/lifecycle-result.json"))
+          required_lifecycle=["fresh_install","exact_install_hashes","reinstall",
+                              "reinstalled_hashes","configuration_preserved",
+                              "uninstall","uninstall_removes_app_files",
+                              "uninstall_preserves_unrelated_data"]
+          for check in required_lifecycle:
+              print("CACHYOS_GUEST_REAL_INSTALL",check,lifecycle["checks"].get(check))
+              assert lifecycle["checks"][check]["status"]=="PASS",check
+          assert lifecycle["overall"]=="PASS_LIMITED"
+          assert lifecycle["release_approved"] is False
           print("LIVE_CACHYOS_PACKAGE_GUEST: PASS_LIMITED; MASTER_QA: BLOCKED")
           PY
       - name: Preserve authentic native guest evidence on every outcome
