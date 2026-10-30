@@ -108,7 +108,10 @@ class RestrictedStageExecution(unittest.TestCase):
     def test_different_driver_scope_is_blocked(self):
         self.driver["checks"].pop("gui")
         with self.assertRaises(gate.Blocked):
-            self.run_vm() if False else stage.safe_driver(self.driver_path, self.vm_ids)
+            stage.validate_driver(self.driver, self.vm_ids)
+
+    def test_exact_driver_scope_validation(self):
+        self.assertEqual(stage.validate_driver(self.driver,self.vm_ids),self.driver)
 
     def test_host_pauses_before_first_real_command(self):
         self.params["stage"]="host"
