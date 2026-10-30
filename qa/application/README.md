@@ -20,6 +20,12 @@ tests, or independently close full Master QA.
   inherited results, requires independently signed operator checklist,
   independently attested GitHub stage, and separately signed VM and host
   receipts with per-check SHA256 logs.
+- `handoff.py`: assembles and checks a SHA256-bound transport bundle containing
+  the exact ZIP, the unmodified approved checklist and signature, and the
+  independently GitHub-attested receipt. Neither handoff creation nor checking
+  can grant VM PASS or release approval.
+- `test_handoff.py`: covers signed policy, two independent GitHub attestations,
+  altered packages, altered checklists, symlinks, missing files and false approval.
 - `stage_executor.py`: executes only the protected, exact per-app VM/host driver
   commands after checking the signed operator manifest, matching candidate bytes
   and signed GitHub handoff. Captures actual subprocess logs, stops on failure,
@@ -38,8 +44,12 @@ tests, or independently close full Master QA.
   currently deliberately BLOCKED until a real candidate is registered.
 
 ## Exact release-closure contract
-1. Operator signs `qa/application/jobs/ID/manifest.json` using an **offline
-   operator private key**; commit signature to `manifest.sig`. Public key at
+1. Operator signs the **stable** `qa/application/jobs/ID/policy.json`
+   checklist using an offline private key and saves `policy.sig`. A changing
+   candidate `manifest.json` must contain the EXACT same approved checks but
+   binds the new source ZIP SHA256. The existing policy may be reused only
+   when that approved checklist is unchanged; every new candidate revision
+   still requires all applicable tests to be run again. Public key at
    `/etc/devnet-qa/trust/operator.pub` must be root-owned/non-writable.
 2. Register the exact application ZIP at `qa/application/jobs/ID/candidate.zip`.
    Manifest binds the ZIP SHA256, complete applicable checks and stages.
@@ -98,9 +108,9 @@ python3 qa/application/release_coordinator.py \
   have not been deployed or verified.
 - No protected host acceptance executor or signer has been deployed.
 - No full-scope receipt chain has been generated or validated.
-- GitHub coordinator regression run 41141079307: **30/30 PASS** on commit
-  69b7b22467ae8c99a686da040b32a4ace74c8a4b (including real fixture
-  subprocesses, not real application execution).
+- GitHub coordinator regression run 41141854109: **41/41 PASS** on commit
+  b8e8bab0e9734669cf8fc506d831402dd1cac549 (includes transport tampering
+  protection and real fixture subprocesses, not real application execution).
 - GitHub application-stage run 41140630122: blocked with HTTP 403 when
   attempting to read the inaccessible unpublished draft asset.
 - GitHub application-stage run 41140960760: intentionally BLOCKED because
@@ -108,3 +118,20 @@ python3 qa/application/release_coordinator.py \
 
 **Release remains BLOCKED.** The original v0.4.4 runner, router v0.2.4,
 Master QA v0.3.8, original ZIPs, existing VM and gaming guard are preserved.
+
+## Implementation boundary
+
+The newly added `package-private-vm-handoff` GitHub job depends on the
+independent GitHub attestation verification job. It cannot trigger until an
+actual candidate completes GitHub checks. Its output is an unsigned transport
+artifact and does **not** execute real CachyOS VM, host GUI or rollback checks.
+The local broker, real application-specific VM test driver, protected signer
+and automatic dispatch are still missing. The earlier full native CachyOS
+GitHub VM workflow was specific to a small hotfix and is NOT a substitute for
+full application GitHub-first testing. Real GitHub-hosted VM acceptance remains
+NOT_TESTED for any full application candidate.
+
+A preserved `devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip`
+exists in the ChatGPT Library, but its original bytes could not be materialised
+through the present connection. Do not represent it as inspected or assume
+that its contents were installed or integrated.
