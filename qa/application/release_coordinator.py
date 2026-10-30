@@ -128,7 +128,10 @@ def github_receipt(job_dir, evidence_dir, manifest_hash, by_stage):
 def verify_github_signature(path: Path, repo: str, source: str):
     require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)),
             "invalid pinned GitHub repository")
-    args = ["gh", "attestation", "verify", str(path), "--repo", repo,
+    gh = Path("/usr/bin/gh")
+    require(gh.is_file() and not gh.is_symlink() and gh.stat().st_uid == 0 and
+            (gh.stat().st_mode & 0o022) == 0, "trusted GitHub verifier binary unavailable")
+    args = [str(gh), "attestation", "verify", str(path), "--repo", repo,
             "--signer-workflow", repo + "/.github/workflows/" + WORKFLOW,
             "--source-digest", source]
     try:
@@ -183,8 +186,20 @@ def signed_stage(stage, job_dir, evidence_dir, trust_dir, source, manifest_hash,
     checks = r["checks"]
     require(isinstance(checks, dict) and set(checks) == set(check_ids),
             stage.upper() + " incomplete registered checklist")
-    require(all(v == "PASS" for v in checks.values()),
-            stage.upper() + " contains non-PASS checks")
+    for cid in check_ids:
+        item = checks[cid]
+        require(isinstance(item, dict) and set(item) ==
+                {"status", "log", "log_sha256"},
+                stage.upper() + " missing per-check execution evidence")
+        require(item["status"] == "PASS" and
+                item["log"] == "logs/" + cid + ".log" and
+                isinstance(item["log_sha256"], str) and
+                SHA256.fullmatch(item["log_sha256"]),
+                stage.upper() + " invalid check result/evidence path")
+        log = path.parent / "logs" / (cid + ".log")
+        require(log.is_file() and not log.is_symlink() and
+                sha256(log) == item["log_sha256"],
+                stage.upper() + " missing or tampered execution log")
     return sha256(path)
 
 
