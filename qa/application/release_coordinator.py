@@ -208,6 +208,10 @@ def assess(job_dir: Path, evidence_dir: Path, trust_dir: Path, repo: str,
            stage_verifier=verify_trusted_signature):
     # Every invocation independently rebuilds identity and evidence; never
     # inherits a PASS or persists an AI-issued approval.
+    # The operator-approved manifest is a separate trust root. A model cannot
+    # shorten the mandatory checklist or declare host work non-applicable.
+    stage_verifier(job_dir / "manifest.json", job_dir / "manifest.sig",
+                   trust_dir / "operator.pub")
     m, manifest_hash, by_stage = manifest_for(job_dir)
     gh_path, source = github_receipt(job_dir, evidence_dir, manifest_hash, by_stage)
     github_verifier(gh_path, repo, source)
