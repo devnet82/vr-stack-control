@@ -39,7 +39,7 @@ def register(manifest):
         if not isinstance(check, dict) or set(check) != {"id", "stage", "argv"}:
             fail("invalid check schema")
         cid, stage, argv = check["id"], check["stage"], check["argv"]
-        if not isinstance(cid, str) or not cid or cid in ids:
+        if not isinstance(cid, str) or not cid or not all(z.isalnum() or z in "-_" for z in cid) or cid in ids:
             fail("duplicate/empty check ID")
         ids.add(cid)
         if stage not in VALID or not isinstance(argv, list):
@@ -51,6 +51,8 @@ def register(manifest):
                 fail("unsafe command path")
         elif argv:
             fail("VM/host checks must be performed by trusted downstream executor")
+    if not any(x["stage"]=="github" for x in checks):
+        fail("no GitHub-stage test registered")
     if not REQUIRED.issubset(ids):
         fail("mandatory lifecycle checklist incomplete")
     return job, candidate, checks
@@ -96,6 +98,10 @@ def verify(manifest_path):
     job,candidate,checks=register(m)
     p=OUT/job/"receipt.json"
     d=json.loads(p.read_text())
+    if set(d)!={"schema","job_id","candidate_sha256","manifest_sha256","github_sha","checks","full_acceptance","release_approved"} or d["schema"]!=1 or d["job_id"]!=job:
+        fail("invalid receipt schema/job")
+    if d["github_sha"]!=os.environ.get("GITHUB_SHA") or not isinstance(d["github_sha"],str) or len(d["github_sha"])!=40:
+        fail("wrong/missing GitHub commit identity")
     if d["candidate_sha256"]!=digest(candidate) or d["manifest_sha256"]!=digest(manifest_path):
         fail("receipt provenance mismatch")
     if d["full_acceptance"] is not False or d["release_approved"] is not False:
@@ -103,8 +109,12 @@ def verify(manifest_path):
     if [x["id"] for x in d["checks"]] != [x["id"] for x in checks]:
         fail("incomplete checklist")
     for result,check in zip(d["checks"],checks):
-        if check["stage"]=="github" and result["status"]!="PASS":
-            fail("GitHub check not passed")
+        if check["stage"]=="github":
+            if result["status"]!="PASS" or result.get("exit_code")!=0 or not isinstance(result.get("output_sha256"),str):
+                fail("GitHub check not passed")
+            # Do not confuse a captured log excerpt with complete output evidence.
+            if "output" not in result or not isinstance(result["output"],str):
+                fail("missing GitHub output excerpt")
         if check["stage"]!="github" and result["status"]!="NOT_TESTED":
             fail("VM/host acceptance cannot be certified here")
     print("GITHUB_RECEIPT: SCOPE_LIMITED_VERIFIED")
