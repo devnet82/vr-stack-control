@@ -90,7 +90,13 @@ def main(candidate, result_path, log_path):
                         os.chown(path,nobody.pw_uid,nobody.pw_gid)
             config=home/".config"/"vr-stack"/"stack.conf"
             config.parent.mkdir(parents=True)
+            # The parent .config was created AFTER the earlier ownership
+            # walk. Leaving it root-owned would incorrectly block a genuine
+            # unprivileged installer from creating ~/.config/systemd/user.
+            os.chown(config.parent.parent,nobody.pw_uid,nobody.pw_gid)
             os.chown(config.parent,nobody.pw_uid,nobody.pw_gid)
+            if config.parent.parent.stat().st_uid != nobody.pw_uid:
+                raise RuntimeError("QA fixture config HOME ownership incorrect")
             config.write_text("ORIGINAL_GUEST_CONFIG=preserve\n")
             os.chown(config,nobody.pw_uid,nobody.pw_gid)
             unrelated=home/"KEEP_UNRELATED"
