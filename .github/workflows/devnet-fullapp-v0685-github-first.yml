@@ -76,7 +76,15 @@ jobs:
         run: |
           set -euo pipefail
           echo 'db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3  original-input/candidate.zip' | sha256sum -c -
-          test -c /dev/kvm
+          echo '=== GitHub runner KVM device ==='
+          id
+          ls -l /dev/kvm || true
+          test -c /dev/kvm || { echo 'BLOCKED: GitHub hosted runner has NO /dev/kvm' >&2; exit 2; }
+          if ! test -r /dev/kvm -a -w /dev/kvm; then
+            # Grant only this disposable GitHub runner process access.
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
           test -r /dev/kvm -a -w /dev/kvm
           echo 'GITHUB_HOST_KVM_AVAILABLE (not yet a guest test)'
       - name: Install isolated QEMU and FAT-disk tools on GitHub runner
