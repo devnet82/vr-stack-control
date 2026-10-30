@@ -90,6 +90,23 @@ def manifest_for(job_dir: Path):
     return manifest, sha256(manifest_file), by_stage
 
 
+def verified_policy(job_dir, trust_dir, signature_verifier=verify_trusted_signature):
+    """Check stable approved scope separately from the changing candidate revision."""
+    policy_path = job_dir / "policy.json"
+    signature_verifier(policy_path, job_dir / "policy.sig", trust_dir / "operator.pub")
+    policy = load(policy_path)
+    require(isinstance(policy, dict) and
+            set(policy) == {"schema", "job_id", "checks"} and
+            policy.get("schema") == "devnet-qa-checklist-v1" and
+            policy.get("job_id") == job_dir.name,
+            "approved QA policy schema/job mismatch")
+    manifest = load(job_dir / "manifest.json")
+    require(isinstance(manifest, dict) and
+            policy["checks"] == manifest.get("checks"),
+            "candidate checklist changed without operator policy approval")
+    return sha256(policy_path)
+
+
 def github_receipt(job_dir, evidence_dir, manifest_hash, by_stage):
     path = evidence_dir / "github" / "receipt.json"
     r = load(path)
@@ -208,10 +225,9 @@ def assess(job_dir: Path, evidence_dir: Path, trust_dir: Path, repo: str,
            stage_verifier=verify_trusted_signature):
     # Every invocation independently rebuilds identity and evidence; never
     # inherits a PASS or persists an AI-issued approval.
-    # The operator-approved manifest is a separate trust root. A model cannot
-    # shorten the mandatory checklist or declare host work non-applicable.
-    stage_verifier(job_dir / "manifest.json", job_dir / "manifest.sig",
-                   trust_dir / "operator.pub")
+    # Signed stable checklist persists across candidate revisions; exact
+    # candidate SHA/revision and all actual results MUST be retested afresh.
+    verified_policy(job_dir, trust_dir, stage_verifier)
     m, manifest_hash, by_stage = manifest_for(job_dir)
     gh_path, source = github_receipt(job_dir, evidence_dir, manifest_hash, by_stage)
     github_verifier(gh_path, repo, source)
