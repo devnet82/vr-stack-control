@@ -74,8 +74,7 @@ def run_stage(job_dir: Path, evidence_dir: Path, driver_path: Path, trust_dir: P
               signature_verifier=gate.verify_trusted_signature,
               pause=game_guard):
     gate.require(stage in ("vm", "host"), "unsupported stage")
-    signature_verifier(job_dir/"manifest.json", job_dir/"manifest.sig",
-                       trust_dir/"operator.pub")
+    gate.verified_policy(job_dir, trust_dir, signature_verifier)
     manifest, manifest_hash, by_stage = gate.manifest_for(job_dir)
     gh_receipt, source = gate.github_receipt(job_dir, evidence_dir, manifest_hash, by_stage)
     github_verifier(gh_receipt, repo, source)
