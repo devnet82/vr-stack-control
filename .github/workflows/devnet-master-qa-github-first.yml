@@ -5,6 +5,7 @@ on:
     paths:
       - 'qa/master/devnet-master-qa-unified-v0.3.6-QA-BLOCKED.zip'
       - '.github/workflows/devnet-master-qa-github-first.yml'
+      - 'qa/master/MASTER_QA_WEB_RESEARCH_REQUIREMENT.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,6 +16,21 @@ jobs:
     steps:
       - name: Checkout candidate branch
         uses: actions/checkout@v4
+      - name: Enforce mandatory web-research policy presence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          policy=Path('qa/master/MASTER_QA_WEB_RESEARCH_REQUIREMENT.md')
+          assert policy.is_file(), 'BLOCKED: missing Master QA online-research requirement'
+          text=policy.read_text(encoding='utf-8')
+          for item in ('BEFORE attempting a repair','exact installed versions',
+                       'source names and URLs','WEB_RESEARCH_BLOCKED',
+                       '100% of all applicable QA','release_approved=false',
+                       'untrusted','not an executed tool call'):
+              assert item in text, 'BLOCKED: research policy incomplete: '+item
+          print('MASTER_QA_WEB_RESEARCH_POLICY: PRESENT_AND_REQUIRED')
+          PY
       - name: Validate exact package and run full bundled suite
         shell: bash
         run: |
