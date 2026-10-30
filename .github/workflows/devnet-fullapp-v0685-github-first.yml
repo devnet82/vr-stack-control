@@ -1,0 +1,51 @@
+name: Devnet full-application baseline v0.6.85 — GitHub FIRST (release blocked)
+on:
+  push:
+    branches: [qa/registered-app-executor-fix-v0.1.0]
+    paths:
+      - '.github/workflows/devnet-fullapp-v0685-github-first.yml'
+      - 'qa/application/candidate_checks.py'
+      - 'qa/application/v0685_baseline_inspect.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  exact-candidate-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Fetch preserved published full application (never rebuild)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p baseline-evidence
+          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 180 \
+            'https://github.com/devnet82/vr-stack-control/releases/download/v0.6.85/vr-stack-control-v0.6.85.zip' \
+            -o baseline-evidence/candidate.zip
+          echo 'db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3  baseline-evidence/candidate.zip' | sha256sum --check -
+          test "$(stat --format=%s baseline-evidence/candidate.zip)" -eq 53403
+      - name: Run genuine archive integrity, safety and source-syntax checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 qa/application/candidate_checks.py integrity baseline-evidence/candidate.zip
+          python3 qa/application/candidate_checks.py safety baseline-evidence/candidate.zip
+          python3 qa/application/candidate_checks.py python_syntax baseline-evidence/candidate.zip
+          python3 qa/application/v0685_baseline_inspect.py \
+            baseline-evidence/candidate.zip baseline-evidence/inspection.json
+          python3 -m json.tool baseline-evidence/inspection.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v0685-original-github-input-and-structure
+          path: baseline-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Fail closed after input checks
+        if: always()
+        run: |
+          echo 'Only original archived full-app ZIP integrity/static checks are within this job scope.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Real GitHub-hosted CachyOS install/upgrade/rollback/GUI and user VM/host checks NOT_TESTED. RELEASE BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
