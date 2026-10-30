@@ -155,8 +155,9 @@ jobs:
             mcopy -o -i "$root/control.img" ::/controller.log native-evidence/controller.log >/dev/null 2>&1 || true
             mcopy -o -i "$root/control.img" ::/lifecycle-result.json native-evidence/lifecycle-result.json >/dev/null 2>&1 || true
             mcopy -o -i "$root/control.img" ::/lifecycle-tests.log native-evidence/lifecycle-tests.log >/dev/null 2>&1 || true
-            if mcopy -o -i "$root/control.img" ::/qa-result.json native-evidence/qa-result.json >/dev/null 2>&1; then
-              if python3 -c 'import json; json.load(open("native-evidence/qa-result.json"))' 2>/dev/null; then
+            if mcopy -o -i "$root/control.img" ::/qa-result.json native-evidence/qa-result.json >/dev/null 2>&1 \
+               && mcopy -o -i "$root/control.img" ::/lifecycle-result.json native-evidence/lifecycle-result.json >/dev/null 2>&1; then
+              if python3 -c 'import json; json.load(open("native-evidence/qa-result.json")); json.load(open("native-evidence/lifecycle-result.json"))' 2>/dev/null; then
                 captured=1
                 break
               fi
