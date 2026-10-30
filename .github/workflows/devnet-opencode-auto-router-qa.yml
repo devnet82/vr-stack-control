@@ -7,6 +7,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 jobs:
   validate-router-candidate:
     runs-on: ubuntu-24.04
@@ -21,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, os, pathlib, subprocess, sys, tempfile, zipfile
+          import hashlib, json, os, pathlib, subprocess, sys, tempfile, zipfile
           file = pathlib.Path('qa/router/devnet-opencode-auto-router-v0.2.4-QA-BLOCKED.zip')
           expected = '8606216572d244cd222892d4ca91eaa6be8496db6053495b4bc2b4575f5d913a'
           assert file.is_file(), 'BLOCKED: exact router candidate missing'
@@ -69,9 +71,62 @@ jobs:
               print(p.stdout[-12000:],flush=True)
               print(p.stderr[-20000:],flush=True)
               assert p.returncode == 0 and 'Ran 221 tests in' in p.stderr, 'BLOCKED: incomplete Master handoff regression suite'
+              receipt = {
+                  'schema':'devnet-github-stage-receipt-v1',
+                  'stage':'github','scope':'router-v0.2.4-bundled-python-regressions',
+                  'zip_path':str(file),'zip_sha256':expected,
+                  'master_dependency_sha256':'de83312d81636c8f92802060fc516188dc46b62b6d246bf6cc3d2361f0a1500c',
+                  'test_count':221,'status':'PASS','exit_code':p.returncode,
+                  'source_commit_sha':os.environ['GITHUB_SHA'],
+                  'github_run_id':os.environ['GITHUB_RUN_ID'],
+                  'github_run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+                  'release_approved':False,'trusted_vm_or_host':False}
+              pathlib.Path('qa-router-ci-receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\\n')
               print('GITHUB_ROUTER_TEST_EXIT='+str(p.returncode),flush=True)
               sys.exit(p.returncode)
           PY
+      - name: Sign exact tested router ZIP provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: qa/router/devnet-opencode-auto-router-v0.2.4-QA-BLOCKED.zip
+      - name: Sign exact GitHub test receipt
+        uses: actions/attest@v4
+        with:
+          subject-path: qa-router-ci-receipt.json
+      - name: Preserve GitHub test receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: devnet-router-v024-github-stage-receipt
+          path: qa-router-ci-receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Report fail-closed scope
         if: always()
         run: echo 'GitHub Python regression only. Full Master QA, VM, host, live OpenCode/Ollama/GPU, install/rollback and acceptance remain BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+
+  verify-router-provenance:
+    needs: validate-router-candidate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devnet-router-v024-github-stage-receipt
+      - name: Verify independent GitHub signature and exact source commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify qa-router-ci-receipt.json --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/devnet-opencode-auto-router-qa.yml" --source-digest "$GITHUB_SHA"
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          r=json.loads(Path('qa-router-ci-receipt.json').read_text())
+          assert r['source_commit_sha']==os.environ['GITHUB_SHA'] and r['github_run_id']==os.environ['GITHUB_RUN_ID']
+          assert r['stage']=='github' and r['test_count']==221 and r['status']=='PASS' and r['exit_code']==0
+          assert r['release_approved'] is False and r['trusted_vm_or_host'] is False
+          print('GITHUB_SIGNED_ROUTER_STAGE: VERIFIED_SCOPE_LIMITED')
+          PY
