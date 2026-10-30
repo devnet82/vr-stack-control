@@ -75,7 +75,7 @@ python3 qa/application/release_coordinator.py \
   or separate signer has been deployed.
 - No protected host acceptance executor or signer has been deployed.
 - No full-scope receipt chain has been generated or validated.
-- No new coordinator GitHub Actions PASS has been independently confirmed yet.
+- GitHub coordinator regression run 41140097961: 21/21 PASS on commit\n  8b0e42d82610403c886ef35474b4050d04d82e6d.\n- GitHub application-stage run 41140214160: 21/21 regression PASS, then\n  **expected BLOCKED** because no real candidate registration exists.\n  This is NOT completed application acceptance.
 
 **Release remains BLOCKED.** The original v0.4.4 runner, router v0.2.4,
 Master QA v0.3.8, original ZIPs, existing VM and gaming guard are preserved.
