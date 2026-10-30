@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
-          echo "02f0490f8fb7566a016419ebdd5a3851a55f5a3845b106af7c5c11c760c04ac4  $f" | sha256sum -c -
+          echo "10bb63d065a264a9870c24a9b11dae045e654cef4e4e8b2c6e07a12ec4946411  $f" | sha256sum -c -
           test ! -e qa/application/jobs/selftest
           test ! -e qa/application/registered_gate.py
           unzip -nq "$f"
@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
-          echo "02f0490f8fb7566a016419ebdd5a3851a55f5a3845b106af7c5c11c760c04ac4  $f" | sha256sum -c -
+          echo "10bb63d065a264a9870c24a9b11dae045e654cef4e4e8b2c6e07a12ec4946411  $f" | sha256sum -c -
           test ! -e qa/application/jobs/selftest
           test ! -e qa/application/registered_gate.py
           unzip -nq "$f"
@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
-          echo "02f0490f8fb7566a016419ebdd5a3851a55f5a3845b106af7c5c11c760c04ac4  $f" | sha256sum -c -
+          echo "10bb63d065a264a9870c24a9b11dae045e654cef4e4e8b2c6e07a12ec4946411  $f" | sha256sum -c -
           test ! -e qa/application/jobs/selftest
           test ! -e qa/application/registered_gate.py
           unzip -nq "$f"
