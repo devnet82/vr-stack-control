@@ -3,7 +3,7 @@ on:
   push:
     branches: [qa/master-unified-v0.2.4-github-first]
     paths:
-      - 'qa/master/devnet-master-qa-unified-v0.3.5-QA-BLOCKED.zip'
+      - 'qa/master/devnet-master-qa-unified-v0.3.6-QA-BLOCKED.zip'
       - '.github/workflows/devnet-master-qa-github-first.yml'
   workflow_dispatch:
 permissions:
@@ -21,8 +21,8 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import hashlib, pathlib, subprocess, sys, tempfile, zipfile
-          expected = 'd67d16fa555bb87d43c269bd5882dbe2859537a302d1abb55af00bbfb737e672'
-          package = pathlib.Path('qa/master/devnet-master-qa-unified-v0.3.5-QA-BLOCKED.zip')
+          expected = '658fa2dd61f4e63803f43ed0abfb8960e8fd79628d1587d84a08b0f4e7338eed'
+          package = pathlib.Path('qa/master/devnet-master-qa-unified-v0.3.6-QA-BLOCKED.zip')
           assert package.is_file(), 'BLOCKED: expected exact candidate ZIP missing'
           actual = hashlib.sha256(package.read_bytes()).hexdigest()
           assert actual == expected, f'BLOCKED: package digest mismatch {actual}'
@@ -30,7 +30,7 @@ jobs:
               bad = z.testzip()
               assert bad is None, f'BLOCKED: bad archive member {bad}'
               members = [x for x in z.infolist() if not x.is_dir()]
-              assert len(members) == 14, 'BLOCKED: unexpected number of package files'
+              assert len(members) == 19, 'BLOCKED: unexpected number of package files'
               root = pathlib.Path(tmp)
               for info in members:
                   target = (root / info.filename).resolve()
@@ -38,8 +38,9 @@ jobs:
                   assert not info.filename.startswith('/'), 'BLOCKED: absolute path'
                   target.parent.mkdir(parents=True, exist_ok=True)
                   target.write_bytes(z.read(info))
-              sub = root / 'devnet-master-qa-unified-v0.3.5-QA-BLOCKED'
-              pyfiles = [sub / 'devnet-qa-automation/controller.py', sub / 'devnet-qa-automation/agent.py', sub / 'devnet-qa-verified.py', sub / 'test_master_gate.py', sub / 'baseline/controller.py']
+              sub = root / 'devnet-master-qa-unified-v0.3.6-QA-BLOCKED'
+              pyfiles = sorted(sub.rglob('*.py'))
+              assert len(pyfiles) == 17, 'BLOCKED: unexpected Python file count'
               for f in pyfiles:
                   assert f.is_file(), f'BLOCKED: missing {f.name}'
                   compile(f.read_bytes(), str(f), 'exec')
