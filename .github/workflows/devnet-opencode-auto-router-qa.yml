@@ -1,0 +1,52 @@
+name: Devnet OpenCode Auto-Router QA — GitHub first
+on:
+  push:
+    branches: [qa/master-unified-v0.2.4-github-first]
+    paths:
+      - 'qa/router/devnet-opencode-auto-router-v0.1.5-QA-BLOCKED.zip'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate-router-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify exact ZIP and full 41-test regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, pathlib, subprocess, sys, tempfile, zipfile
+          file = pathlib.Path('qa/router/devnet-opencode-auto-router-v0.1.5-QA-BLOCKED.zip')
+          expected = '45a196faa5aa4ca4404e07968fb393710bc0daf0fe0a1b3b3337761dfbb0cc94'
+          assert file.is_file(), 'BLOCKED: exact router candidate missing'
+          assert hashlib.sha256(file.read_bytes()).hexdigest() == expected, 'BLOCKED: ZIP SHA256 mismatch'
+          with zipfile.ZipFile(file) as z, tempfile.TemporaryDirectory() as tmp:
+              assert z.testzip() is None, 'BLOCKED: ZIP CRC failure'
+              members = [x for x in z.infolist() if not x.is_dir()]
+              expected_files = {
+                  'devnet-opencode-auto-router-v0.1.5-QA-BLOCKED/auto_route.py',
+                  'devnet-opencode-auto-router-v0.1.5-QA-BLOCKED/test_auto_route.py',
+                  'devnet-opencode-auto-router-v0.1.5-QA-BLOCKED/README.md',
+              }
+              assert {x.filename for x in members} == expected_files, 'BLOCKED: unexpected ZIP contents'
+              root = pathlib.Path(tmp).resolve()
+              for item in members:
+                  path = (root/item.filename).resolve()
+                  assert path.is_relative_to(root) and not item.filename.startswith('/'), 'BLOCKED: ZIP traversal'
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(z.read(item))
+              source = root/'devnet-opencode-auto-router-v0.1.5-QA-BLOCKED'
+              for f in source.glob('*.py'): compile(f.read_bytes(), str(f), 'exec')
+              p = subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source),'-p','test_*.py','-v'],cwd=source,check=False)
+              print('GITHUB_ROUTER_TEST_EXIT='+str(p.returncode),flush=True)
+              sys.exit(p.returncode)
+          PY
+      - name: Report fail-closed scope
+        if: always()
+        run: echo 'GitHub Python regression only. Full Master QA, VM, host, live OpenCode/Ollama/GPU, install/rollback and acceptance remain BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
