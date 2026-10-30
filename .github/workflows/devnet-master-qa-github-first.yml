@@ -3,7 +3,7 @@ on:
   push:
     branches: [qa/master-unified-v0.2.4-github-first]
     paths:
-      - 'qa/master/devnet-master-qa-unified-v0.2.6-QA-BLOCKED.zip'
+      - 'qa/master/devnet-master-qa-unified-v0.2.7-QA-BLOCKED.zip'
       - '.github/workflows/devnet-master-qa-github-first.yml'
   workflow_dispatch:
 permissions:
@@ -21,8 +21,8 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import hashlib, pathlib, subprocess, sys, tempfile, zipfile
-          expected = 'b28c49c95c9516ee5fecdccc2585cc3bcfcfed921bfd27c1552ca5a999b85374'
-          package = pathlib.Path('qa/master/devnet-master-qa-unified-v0.2.6-QA-BLOCKED.zip')
+          expected = 'dcc747c626d77e537140288759a31e26b7ef8b340c2d3439bf029565fdd32dcc'
+          package = pathlib.Path('qa/master/devnet-master-qa-unified-v0.2.7-QA-BLOCKED.zip')
           assert package.is_file(), 'BLOCKED: expected exact candidate ZIP missing'
           actual = hashlib.sha256(package.read_bytes()).hexdigest()
           assert actual == expected, f'BLOCKED: package digest mismatch {actual}'
@@ -30,7 +30,7 @@ jobs:
               bad = z.testzip()
               assert bad is None, f'BLOCKED: bad archive member {bad}'
               members = [x for x in z.infolist() if not x.is_dir()]
-              assert len(members) == 7, 'BLOCKED: unexpected number of package files'
+              assert len(members) == 8, 'BLOCKED: unexpected number of package files'
               root = pathlib.Path(tmp)
               for info in members:
                   target = (root / info.filename).resolve()
@@ -38,12 +38,12 @@ jobs:
                   assert not info.filename.startswith('/'), 'BLOCKED: absolute path'
                   target.parent.mkdir(parents=True, exist_ok=True)
                   target.write_bytes(z.read(info))
-              sub = root / 'devnet-master-qa-unified-v0.2.6-QA-BLOCKED'
+              sub = root / 'devnet-master-qa-unified-v0.2.7-QA-BLOCKED'
               pyfiles = [sub / 'devnet-qa-automation/controller.py', sub / 'devnet-qa-automation/agent.py', sub / 'devnet-qa-verified.py', sub / 'test_master_gate.py', sub / 'baseline/controller.py']
               for f in pyfiles:
                   assert f.is_file(), f'BLOCKED: missing {f.name}'
                   compile(f.read_bytes(), str(f), 'exec')
-              p = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(sub), '-p', 'test_master_gate.py', '-v'], cwd=sub)
+              p = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(sub), '-p', 'test_*.py', '-v'], cwd=sub)
               print(f'GH_UNITTEST_EXIT={p.returncode}', flush=True)
               sys.exit(p.returncode)
           PY
