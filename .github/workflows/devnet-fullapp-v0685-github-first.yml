@@ -6,6 +6,7 @@ on:
       - '.github/workflows/devnet-fullapp-v0685-github-first.yml'
       - 'qa/application/candidate_checks.py'
       - 'qa/application/v0685_baseline_inspect.py'
+      - 'qa/application/v0685_installed_lifecycle.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -37,6 +38,13 @@ jobs:
           python3 qa/application/v0685_baseline_inspect.py \
             baseline-evidence/candidate.zip baseline-evidence/inspection.json
           python3 -m json.tool baseline-evidence/inspection.json
+      - name: Install and uninstall EXACT ZIP in disposable unprivileged HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 qa/application/v0685_installed_lifecycle.py \
+            baseline-evidence/candidate.zip baseline-evidence/disposable-lifecycle
+          python3 -m json.tool baseline-evidence/disposable-lifecycle/lifecycle-receipt.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -47,5 +55,5 @@ jobs:
       - name: Fail closed after input checks
         if: always()
         run: |
-          echo 'Only original archived full-app ZIP integrity/static checks are within this job scope.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Original full-app ZIP integrity and Ubuntu disposable-home install/reinstall/uninstall checks only.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Real GitHub-hosted CachyOS install/upgrade/rollback/GUI and user VM/host checks NOT_TESTED. RELEASE BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
