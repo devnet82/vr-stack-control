@@ -2,7 +2,8 @@
 
 This is a **candidate-specific acceptance gate** for the existing Devnet Master QA.
 It is not another router, a replacement for the fixed-scope controller v0.4.4,
-or a licence for AI self-approval. It cannot execute real VM GUI tests yet.
+or a licence for AI self-approval. The candidate-aware VM-stage engine has
+passed its regression tests but has NOT been deployed or used to run a real app.
 
 ## Confirmed installed-system fault (30 October 2026)
 The existing `~/.local/lib/devnet-qa-automation/controller.py` checks exactly
@@ -19,6 +20,15 @@ tests, or independently close full Master QA.
   inherited results, requires independently signed operator checklist,
   independently attested GitHub stage, and separately signed VM and host
   receipts with per-check SHA256 logs.
+- `stage_executor.py`: executes only the protected, exact per-app VM/host driver
+  commands after checking the signed operator manifest, matching candidate bytes
+  and signed GitHub handoff. Captures actual subprocess logs, stops on failure,
+  prevents evidence reuse and intentionally cannot sign or approve itself.
+  VM/host protected drivers, isolated signing services and host broker are not
+  yet provisioned.
+- `test_stage_executor.py`: verified regressions for real fixture subprocesses,
+  failure aborts, driver scope, fresh evidence and gaming pause; these are
+  fixture tests, NOT actual CachyOS GUI acceptance.
 - `test_release_coordinator.py`: positive test and negative cases covering
   missing signatures, changed candidate/checklist/revision, missing stages,
   FAIL statuses, altered logs and broken chain.
@@ -39,7 +49,8 @@ tests, or independently close full Master QA.
    by the designated workflow, then placed at
    `EVIDENCE/github/receipt.json`. The coordinator validates the exact source
    commit with `/usr/bin/gh attestation verify`.
-4. A trusted CachyOS VM executor (still missing) must install the **same**
+4. Deploy the new stage executor with a root-controlled, job-specific VM
+   test driver in the CachyOS guest. The driver must install the **same**
    candidate and run every registered VM check. Its `EVIDENCE/vm/receipt.json`
    must be signed as `receipt.sig` with a private key inaccessible to OpenCode,
    the regular user process and the AI. Root-owned public key:
@@ -69,13 +80,31 @@ python3 qa/application/release_coordinator.py \
 ```
 
 ## Current blockers — do NOT misreport as passed
-- No genuine candidate ZIP and complete operator-approved registration exists
-  on the current QA branch.
-- No trusted, candidate-specific CachyOS VM install/GUI/tray/rollback executor
-  or separate signer has been deployed.
+- No current FULL application ZIP and complete operator-approved registration
+  exists on this QA branch. We found an unpublished draft release asset
+  `vr-stack-control-v0.6.132.zip` (SHA256
+  `04118623d828de96526e1c185409c586bf9ed1b4b1318451e4301277ff69baf1`,
+  4,675 bytes), but the 30 Sep QA engineering report identifies it as a
+  **version-sync hotfix**, NOT the full application. A provisional full-app
+  registration was withdrawn; the original draft ZIP was NOT touched.
+- GitHub Actions cannot read that draft-release asset using its current
+  token: `Resource not accessible by integration (HTTP 403)`.
+  Do not publish the draft or weaken token restrictions just to make CI green.
+- The full-app preview v0.6.135 ZIP was not uploaded to GitHub according
+  to its own archived STATUS.md; no exact full-app candidate is supplied.
+- There is no protected, complete, operator-signed per-application checklist.
+- `stage_executor.py` exists, but has NOT been installed on the VM. Real
+  candidate-specific install/GUI/tray/rollback driver and independent signer
+  have not been deployed or verified.
 - No protected host acceptance executor or signer has been deployed.
 - No full-scope receipt chain has been generated or validated.
-- GitHub coordinator regression run 41140097961: 21/21 PASS on commit\n  8b0e42d82610403c886ef35474b4050d04d82e6d.\n- GitHub application-stage run 41140214160: 21/21 regression PASS, then\n  **expected BLOCKED** because no real candidate registration exists.\n  This is NOT completed application acceptance.
+- GitHub coordinator regression run 41140833119: **29/29 PASS** on commit
+  8867c0a94f653f8379b2f75a5307491a59f36f34 (including real fixture
+  subprocesses, not real application execution).
+- GitHub application-stage run 41140630122: blocked with HTTP 403 when
+  attempting to read the inaccessible unpublished draft asset.
+- GitHub application-stage run 41140960760: intentionally BLOCKED because
+  no complete application is registered. Neither is a full acceptance run.
 
 **Release remains BLOCKED.** The original v0.4.4 runner, router v0.2.4,
 Master QA v0.3.8, original ZIPs, existing VM and gaming guard are preserved.
