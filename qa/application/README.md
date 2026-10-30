@@ -98,8 +98,8 @@ python3 qa/application/release_coordinator.py \
   have not been deployed or verified.
 - No protected host acceptance executor or signer has been deployed.
 - No full-scope receipt chain has been generated or validated.
-- GitHub coordinator regression run 41140833119: **29/29 PASS** on commit
-  8867c0a94f653f8379b2f75a5307491a59f36f34 (including real fixture
+- GitHub coordinator regression run 41141079307: **30/30 PASS** on commit
+  69b7b22467ae8c99a686da040b32a4ace74c8a4b (including real fixture
   subprocesses, not real application execution).
 - GitHub application-stage run 41140630122: blocked with HTTP 403 when
   attempting to read the inaccessible unpublished draft asset.
