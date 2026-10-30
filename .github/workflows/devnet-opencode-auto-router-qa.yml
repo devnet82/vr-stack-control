@@ -3,7 +3,7 @@ on:
   push:
     branches: [qa/master-unified-v0.2.4-github-first]
     paths:
-      - 'qa/router/devnet-opencode-auto-router-v0.2.2-QA-BLOCKED.zip'
+      - 'qa/router/devnet-opencode-auto-router-v0.2.3-QA-BLOCKED.zip'
   workflow_dispatch:
 permissions:
   contents: read
@@ -16,36 +16,38 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - name: Verify exact ZIP and full 174-test regression suite
+      - name: Verify exact ZIP and full 207-test regression suite
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, pathlib, subprocess, sys, tempfile, zipfile
-          file = pathlib.Path('qa/router/devnet-opencode-auto-router-v0.2.2-QA-BLOCKED.zip')
-          expected = '1cda053685a995327d6da8423eeb2d2689b69b6cb91393e902cb1d68e15041bb'
+          import hashlib, os, pathlib, subprocess, sys, tempfile, zipfile
+          file = pathlib.Path('qa/router/devnet-opencode-auto-router-v0.2.3-QA-BLOCKED.zip')
+          expected = '60e66a3a25147fd1890fd50869993153578a7fd80a0831d413e2efacce027022'
           assert file.is_file(), 'BLOCKED: exact router candidate missing'
           assert hashlib.sha256(file.read_bytes()).hexdigest() == expected, 'BLOCKED: ZIP SHA256 mismatch'
           with zipfile.ZipFile(file) as z, tempfile.TemporaryDirectory() as tmp:
               assert z.testzip() is None, 'BLOCKED: ZIP CRC failure'
               members = [x for x in z.infolist() if not x.is_dir()]
               expected_files = {
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/README.md',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/auto_route.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/baseline_v017.zip',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/opencode.json',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/qa_dispatch.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/qa_live_recovery_v017.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/qa_review_worker.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_auto_handover.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_auto_route.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_qa_dispatch.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_session_recovery.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_v019_host_isolation.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_v020_review_schema.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_v021_tool_collision.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/test_v022_deterministic_tool_fallback.py',
-                  'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED/.opencode/tools/devnet_router_regressions_v021.ts',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/README.md',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/auto_route.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/baseline_v017.zip',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/opencode.json',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/qa_dispatch.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/qa_live_recovery_v017.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/qa_review_worker.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_auto_handover.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_auto_route.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_qa_dispatch.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_session_recovery.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_v019_host_isolation.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_v020_review_schema.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_v021_tool_collision.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_v022_deterministic_tool_fallback.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/test_v023_master_handoff.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/master_qa_bridge.py',
+                  'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED/.opencode/tools/devnet_router_regressions_v021.ts',
               }
               assert {x.filename for x in members} == expected_files, 'BLOCKED: unexpected ZIP contents'
               root = pathlib.Path(tmp).resolve()
@@ -54,12 +56,18 @@ jobs:
                   assert path.is_relative_to(root) and not item.filename.startswith('/'), 'BLOCKED: ZIP traversal'
                   path.parent.mkdir(parents=True, exist_ok=True)
                   path.write_bytes(z.read(item))
-              source = root/'devnet-opencode-auto-router-v0.2.2-QA-BLOCKED'
+              source = root/'devnet-opencode-auto-router-v0.2.3-QA-BLOCKED'
               assert hashlib.sha256((source/'baseline_v017.zip').read_bytes()).hexdigest() == '8a72d480d403c1ecab29a4348a500b9c713a93808f97be94facba270c75d41db', 'BLOCKED: pinned baseline changed'
               assert hashlib.sha256((source/'qa_live_recovery_v017.py').read_bytes()).hexdigest() == 'd020f62b9a86d0a3547f82dcdbc3a77d7182300ce3aaf838136acfdf0783b1ee', 'BLOCKED: pinned live runner changed'
               for f in source.glob('*.py'): compile(f.read_bytes(), str(f), 'exec')
-              assert len(list(source.glob('*.py'))) == 12, 'BLOCKED: unexpected Python module count'
-              p = subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source),'-p','test_*.py','-v'],cwd=source,check=False)
+              assert len(list(source.glob('*.py'))) == 14, 'BLOCKED: unexpected Python module count'
+              master = pathlib.Path('qa/master/devnet-master-qa-unified-v0.3.8-QA-BLOCKED.zip').resolve()
+              assert master.is_file() and hashlib.sha256(master.read_bytes()).hexdigest() == 'de83312d81636c8f92802060fc516188dc46b62b6d246bf6cc3d2361f0a1500c', 'BLOCKED: exact Master QA v0.3.8 dependency unavailable'
+              env = {**os.environ, 'DEVNET_PINNED_MASTER_ZIP':str(master)}
+              p = subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source),'-p','test_*.py','-v'],cwd=source,check=False,env=env,capture_output=True,text=True,timeout=180)
+              print(p.stdout[-12000:],flush=True)
+              print(p.stderr[-20000:],flush=True)
+              assert p.returncode == 0 and 'Ran 207 tests in' in p.stderr, 'BLOCKED: incomplete Master handoff regression suite'
               print('GITHUB_ROUTER_TEST_EXIT='+str(p.returncode),flush=True)
               sys.exit(p.returncode)
           PY
