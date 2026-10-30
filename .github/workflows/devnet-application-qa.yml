@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+      - name: Install pinned cryptographic test dependency
+        run: python -m pip install --disable-pip-version-check 'cryptography==50.0.2'
       - name: Validate fail-closed gate
         run: python3 -m unittest discover -s qa/application -p 'test_*.py' -v
       - name: Execute registered candidate GitHub checklist
