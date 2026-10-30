@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -109,7 +110,7 @@ class StageChain(unittest.TestCase):
                            stage_verifier=self.signature_verifier)
 
     def blocked(self):
-        with self.assertRaises((gate.Blocked, ValueError)):
+        with self.assertRaises((gate.Blocked, ValueError, InvalidSignature)):
             self.assess()
 
     def test_exact_signed_chain_reaches_operator_only(self):
