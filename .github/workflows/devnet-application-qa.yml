@@ -43,3 +43,64 @@ jobs:
       - name: Preserve release block
         if: always()
         run: echo 'GitHub-only stage; VM, host and operator acceptance NOT verified. RELEASE BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+
+  sign-candidate-evidence:
+    needs: application-github
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence
+      - name: Recheck candidate and stage receipt before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          test "${#manifests[@]}" -eq 1
+          python3 qa/application/registered_gate.py verify "${manifests[0]}"
+      - uses: actions/attest@v4
+        with:
+          subject-path: qa/application/jobs/*/candidate.zip
+      - uses: actions/attest@v4
+        with:
+          subject-path: qa-stage-evidence/*/receipt.json
+  independent-signature-check:
+    needs: sign-candidate-evidence
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence
+      - name: Verify candidate-bound GitHub-issued signatures
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          test "${#manifests[@]}" -eq 1
+          python3 qa/application/registered_gate.py verify "${manifests[0]}"
+          zips=(qa/application/jobs/*/candidate.zip)
+          receipts=(qa-stage-evidence/*/receipt.json)
+          test "${#zips[@]}" -eq 1
+          test "${#receipts[@]}" -eq 1
+          gh attestation verify "${zips[0]}" --repo "${GITHUB_REPOSITORY}"
+          gh attestation verify "${receipts[0]}" --repo "${GITHUB_REPOSITORY}"
+          echo 'SIGNED_GITHUB_STAGE_VERIFIED. REAL VM/HOST/RELEASE STILL BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
