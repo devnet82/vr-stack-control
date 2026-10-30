@@ -21,6 +21,17 @@ jobs:
           python-version: '3.13'
       - name: Install pinned cryptographic test dependency
         run: python -m pip install --disable-pip-version-check 'cryptography==50.0.2'
+      - name: Fetch exact archived application ZIP without rebuilding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          f="qa/application/jobs/vr-stack-v06132/candidate.zip"
+          test ! -e "$f"
+          gh api -H 'Accept: application/octet-stream' \
+            'repos/devnet82/vr-stack-control/releases/assets/630444309' > "$f"
+          echo "04118623d828de96526e1c185409c586bf9ed1b4b1318451e4301277ff69baf1  $f" | sha256sum -c -
       - name: Validate fail-closed gate
         run: python3 -m unittest discover -s qa/application -p 'test_*.py' -v
       - name: Execute registered candidate GitHub checklist
@@ -61,6 +72,17 @@ jobs:
         with:
           name: registered-application-github-evidence
           path: qa-stage-evidence
+      - name: Fetch exact archived application ZIP without rebuilding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          f="qa/application/jobs/vr-stack-v06132/candidate.zip"
+          test ! -e "$f"
+          gh api -H 'Accept: application/octet-stream' \
+            'repos/devnet82/vr-stack-control/releases/assets/630444309' > "$f"
+          echo "04118623d828de96526e1c185409c586bf9ed1b4b1318451e4301277ff69baf1  $f" | sha256sum -c -
       - name: Recheck candidate and stage receipt before signing
         shell: bash
         run: |
@@ -89,6 +111,17 @@ jobs:
         with:
           name: registered-application-github-evidence
           path: qa-stage-evidence
+      - name: Fetch exact archived application ZIP without rebuilding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          f="qa/application/jobs/vr-stack-v06132/candidate.zip"
+          test ! -e "$f"
+          gh api -H 'Accept: application/octet-stream' \
+            'repos/devnet82/vr-stack-control/releases/assets/630444309' > "$f"
+          echo "04118623d828de96526e1c185409c586bf9ed1b4b1318451e4301277ff69baf1  $f" | sha256sum -c -
       - name: Verify candidate-bound GitHub-issued signatures
         shell: bash
         env:
@@ -103,6 +136,6 @@ jobs:
           receipts=(qa-stage-evidence/*/receipt.json)
           test "${#zips[@]}" -eq 1
           test "${#receipts[@]}" -eq 1
-          gh attestation verify "${zips[0]}" --repo "${GITHUB_REPOSITORY}"
-          gh attestation verify "${receipts[0]}" --repo "${GITHUB_REPOSITORY}"
+          gh attestation verify "${zips[0]}" --repo "${GITHUB_REPOSITORY}" --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devnet-application-qa.yml" --source-digest "$GITHUB_SHA"
+          gh attestation verify "${receipts[0]}" --repo "${GITHUB_REPOSITORY}" --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devnet-application-qa.yml" --source-digest "$GITHUB_SHA"
           echo 'SIGNED_GITHUB_STAGE_VERIFIED. REAL VM/HOST/RELEASE STILL BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
