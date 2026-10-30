@@ -74,8 +74,17 @@ class StageChain(unittest.TestCase):
     def make_signed_stages(self):
         prev = gate.sha256(self.evidence / "github" / "receipt.json")
         for stage in ("vm", "host"):
-            checks = {c["id"]: "PASS" for c in self.manifest["checks"]
-                      if c["stage"] == stage}
+            checks = {}
+            logdir = self.evidence / stage / "logs"
+            logdir.mkdir(parents=True, exist_ok=True)
+            for check in self.manifest["checks"]:
+                if check["stage"] != stage:
+                    continue
+                cid = check["id"]
+                log = logdir / (cid + ".log")
+                log.write_text("actual executor placeholder evidence " + cid)
+                checks[cid] = {"status": "PASS", "log": "logs/" + cid + ".log",
+                               "log_sha256": gate.sha256(log)}
             body = {"schema": gate.SCHEMA, "stage": stage, "job_id": "demo",
                     "candidate_sha256": self.manifest["sha256"],
                     "manifest_sha256": gate.sha256(self.job / "manifest.json"),
@@ -141,7 +150,7 @@ class StageChain(unittest.TestCase):
     def test_vm_fail_does_not_advance(self):
         p = self.evidence / "vm" / "receipt.json"
         d = json.loads(p.read_text())
-        d["checks"]["gui"] = "FAIL"
+        d["checks"]["gui"]["status"] = "FAIL"
         self.write_receipt("vm", d)
         self.blocked()
 
@@ -172,6 +181,10 @@ class StageChain(unittest.TestCase):
         (self.evidence / "host" / "receipt.sig").write_bytes(b"fake-signature")
         with self.assertRaises(Exception):
             self.assess()
+
+    def test_tampered_vm_check_log_is_blocked(self):
+        (self.evidence / "vm" / "logs" / "gui.log").write_text("tampered")
+        self.blocked()
 
     def test_missing_installed_candidate(self):
         (self.job / "candidate.zip").unlink()
