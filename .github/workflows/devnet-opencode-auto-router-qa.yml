@@ -81,7 +81,7 @@ jobs:
                   'github_run_id':os.environ['GITHUB_RUN_ID'],
                   'github_run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
                   'release_approved':False,'trusted_vm_or_host':False}
-              pathlib.Path('qa-router-ci-receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\\n')
+              pathlib.Path('qa-router-ci-receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')
               print('GITHUB_ROUTER_TEST_EXIT='+str(p.returncode),flush=True)
               sys.exit(p.returncode)
           PY
