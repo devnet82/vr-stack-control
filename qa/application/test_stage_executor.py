@@ -111,6 +111,10 @@ class RestrictedStageExecution(unittest.TestCase):
             stage.validate_driver(self.driver, self.vm_ids)
 
     def test_exact_driver_scope_validation(self):
+        # GitHub setup-python can expose sys.executable as a symlink; driver
+        # policy intentionally requires a direct root-managed executable.
+        for test in self.driver["checks"].values():
+            test["argv"] = ["/usr/bin/printf", "TEST_OK"]
         self.assertEqual(stage.validate_driver(self.driver,self.vm_ids),self.driver)
 
     def test_host_pauses_before_first_real_command(self):
