@@ -106,13 +106,13 @@ jobs:
             "$base/$name" -o "/tmp/devnet-native-v0685/$name"
           (cd /tmp/devnet-native-v0685 && sha256sum -c "$name.sha256") | tee native-evidence/iso-sha256.txt
           root="https://raw.githubusercontent.com/devnet82/devnet-cachyos-repair/d8e4447d19e77a77dc355dc07e72c0c5c3edf741/qa/portfolio-cachyos-vm-v0.1.0"
-          curl -fLsS "$root/guest_package_qa.py" -o /tmp/devnet-native-v0685/guest_package_qa.py
           curl -fLsS "$root/qemu_control.py" -o /tmp/devnet-native-v0685/qemu_control.py
-          python3 -m py_compile /tmp/devnet-native-v0685/guest_package_qa.py /tmp/devnet-native-v0685/qemu_control.py
+          python3 -m py_compile /tmp/devnet-native-v0685/qemu_control.py
+          python3 -m py_compile qa/application/guest_v0685_package.py
           truncate -s 128M /tmp/devnet-native-v0685/control.img
           mkfs.vfat -F 32 -n DEVNETQA /tmp/devnet-native-v0685/control.img >/dev/null
           img=/tmp/devnet-native-v0685/control.img
-          mcopy -i "$img" /tmp/devnet-native-v0685/guest_package_qa.py ::/guest_package_qa.py
+          mcopy -i "$img" qa/application/guest_v0685_package.py ::/guest_v0685_package.py
           python3 -m py_compile qa/application/guest_v0685_lifecycle.py
           mcopy -i "$img" qa/application/guest_v0685_lifecycle.py ::/guest_v0685_lifecycle.py
           mcopy -i "$img" original-input/candidate.zip ::/candidate.zip
@@ -124,9 +124,7 @@ jobs:
           echo "DEVNET_NATIVE_CACHYOS_ORIGINAL_v0685_QA_START"
           cat /etc/os-release
           uname -r
-          python3 /mnt/guest_package_qa.py /mnt/candidate.zip \
-            db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3 \
-            0.6.85 /mnt/qa-result.json /mnt/package-tests.log
+          python3 /mnt/guest_v0685_package.py /mnt/candidate.zip /mnt/qa-result.json
           python3 /mnt/guest_v0685_lifecycle.py /mnt/candidate.zip \
             /mnt/lifecycle-result.json /mnt/lifecycle-tests.log
           GUEST
@@ -153,7 +151,6 @@ jobs:
           captured=0
           for attempt in $(seq 1 75); do
             mcopy -o -i "$root/control.img" ::/controller.log native-evidence/controller.log >/dev/null 2>&1 || true
-            mcopy -o -i "$root/control.img" ::/package-tests.log native-evidence/package-tests.log >/dev/null 2>&1 || true
             mcopy -o -i "$root/control.img" ::/lifecycle-result.json native-evidence/lifecycle-result.json >/dev/null 2>&1 || true
             mcopy -o -i "$root/control.img" ::/lifecycle-tests.log native-evidence/lifecycle-tests.log >/dev/null 2>&1 || true
             if mcopy -o -i "$root/control.img" ::/qa-result.json native-evidence/qa-result.json >/dev/null 2>&1; then
@@ -168,13 +165,15 @@ jobs:
           python3 - <<'PY'
           import json
           r=json.load(open("native-evidence/qa-result.json"))
-          assert r["format"]=="devnet-native-cachyos-vm-qa-v0.1.0"
+          assert r["schema"]=="devnet-native-cachyos-v0685-package-v1"
           required=["native_cachyos","control_disk_identity","exact_sha256",
-                    "zip_integrity","package_version","native_syntax"]
+                    "zip_integrity","full_application_layout","native_syntax",
+                    "version_bin_vr-control","version_bin_vr-control-gui",
+                    "version_bin_vr-stack-tray"]
           for check in required:
               print("CACHYOS_GUEST",check,r["checks"].get(check))
               assert r["checks"][check]["status"]=="PASS", check
-          assert r["release_decision"]=="BLOCKED"
+          assert r["release_approved"] is False
           assert r["overall"]=="PARTIAL"  # Installed OS/GUI remain unverified
           lifecycle=json.load(open("native-evidence/lifecycle-result.json"))
           required_lifecycle=["fresh_install","exact_install_hashes","reinstall",
