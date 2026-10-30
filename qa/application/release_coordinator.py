@@ -90,7 +90,7 @@ def manifest_for(job_dir: Path):
     return manifest, sha256(manifest_file), by_stage
 
 
-def verified_policy(job_dir, trust_dir, signature_verifier=verify_trusted_signature):
+def verified_policy(job_dir, trust_dir, signature_verifier):
     """Check stable approved scope separately from the changing candidate revision."""
     policy_path = job_dir / "policy.json"
     signature_verifier(policy_path, job_dir / "policy.sig", trust_dir / "operator.pub")
