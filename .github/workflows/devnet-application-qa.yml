@@ -108,3 +108,47 @@ jobs:
           gh attestation verify "${zips[0]}" --repo "${GITHUB_REPOSITORY}" --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devnet-application-qa.yml" --source-digest "$GITHUB_SHA"
           gh attestation verify "${receipts[0]}" --repo "${GITHUB_REPOSITORY}" --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devnet-application-qa.yml" --source-digest "$GITHUB_SHA"
           echo 'SIGNED_GITHUB_STAGE_VERIFIED. REAL VM/HOST/RELEASE STILL BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  package-private-vm-handoff:
+    # Only after independent GitHub signature verification.
+    # This transport artifact is NOT VM test evidence or release approval.
+    needs: independent-signature-check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence
+      - name: Prepare candidate-specific handoff (no VM execution)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          receipts=(qa-stage-evidence/*/receipt.json)
+          test "${#manifests[@]}" -eq 1
+          test "${#receipts[@]}" -eq 1
+          work="$(mktemp -d)"
+          mkdir -p "$work/github"
+          cp -- "${receipts[0]}" "$work/github/receipt.json"
+          jobdir="$(dirname -- "${manifests[0]}")"
+          test -f "$jobdir/policy.json" -a -f "$jobdir/policy.sig"
+          python3 qa/application/handoff.py assemble \
+            --job-dir "$jobdir" \
+            --evidence-dir "$work" \
+            --handoff-dir "$RUNNER_TEMP/private-vm-handoff"
+          echo 'GitHub handoff prepared; VM/host NOT_TESTED, release BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devnet-private-vm-handoff
+          path: ${{ runner.temp }}/private-vm-handoff
+          retention-days: 30
+          if-no-files-found: error
