@@ -29,7 +29,10 @@ def safe_driver(path: Path, ids):
                  path.stat().st_uid == 0 and
                  not (path.stat().st_mode & 0o022),
                  "trusted root-controlled driver unavailable")
-    driver = gate.load(path)
+    return validate_driver(gate.load(path), ids)
+
+def validate_driver(driver, ids):
+    """Check exact driver scope independently of filesystem ownership."""
     gate.require(isinstance(driver, dict) and set(driver) ==
                  {"schema", "stage", "job_id", "checks"},
                  "invalid driver schema")
