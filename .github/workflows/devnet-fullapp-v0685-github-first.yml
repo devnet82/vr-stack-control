@@ -7,6 +7,8 @@ on:
       - 'qa/application/candidate_checks.py'
       - 'qa/application/v0685_baseline_inspect.py'
       - 'qa/application/v0685_installed_lifecycle.py'
+      - 'qa/application/guest_v0685_package.py'
+      - 'qa/application/guest_v0685_lifecycle.py'
   workflow_dispatch:
 permissions:
   contents: read
