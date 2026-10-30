@@ -4,6 +4,7 @@ on:
     branches: [qa/master-unified-v0.2.4-github-first]
     paths:
       - 'qa/router/devnet-opencode-auto-router-v0.2.4-QA-BLOCKED.zip'
+      - '.github/workflows/devnet-opencode-auto-router-qa.yml'
   workflow_dispatch:
 permissions:
   contents: read
