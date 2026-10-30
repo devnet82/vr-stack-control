@@ -42,13 +42,22 @@ class StageChain(unittest.TestCase):
                 key.public_key().public_bytes(
                     encoding=serialization.Encoding.PEM,
                     format=serialization.PublicFormat.SubjectPublicKeyInfo))
-        (self.job / "manifest.sig").write_bytes(
-            self.privates["operator"].sign((self.job / "manifest.json").read_bytes()))
+        self.sign_policy()
         self.make_github()
         self.make_signed_stages()
 
     def save_manifest(self):
         (self.job / "manifest.json").write_text(json.dumps(self.manifest, sort_keys=True))
+
+    def sign_policy(self):
+        # Operator approves the checklist once; each candidate ZIP revision
+        # must still obtain fresh GitHub, VM and host receipts.
+        policy = {"schema": "devnet-qa-checklist-v1", "job_id": "demo",
+                  "checks": self.manifest["checks"]}
+        path = self.job / "policy.json"
+        path.write_text(json.dumps(policy, sort_keys=True))
+        (self.job / "policy.sig").write_bytes(
+            self.privates["operator"].sign(path.read_bytes()))
 
     def write_receipt(self, stage, body):
         p = self.evidence / stage
@@ -190,6 +199,14 @@ class StageChain(unittest.TestCase):
         self.save_manifest()
         with self.assertRaises(Exception):
             self.assess()
+
+    def test_unsigned_candidate_revision_never_inherits_pass(self):
+        # The operator-approved checklist stays signed; revision changes.
+        # Previous receipts for the old artifact must be rejected.
+        self.assertEqual(self.assess()["decision"], "READY_FOR_OPERATOR_ACCEPTANCE")
+        self.manifest["sha256"] = "f" * 64
+        self.save_manifest()
+        self.blocked()
 
     def test_tampered_vm_check_log_is_blocked(self):
         (self.evidence / "vm" / "logs" / "gui.log").write_text("tampered")
