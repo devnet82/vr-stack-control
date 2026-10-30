@@ -231,6 +231,7 @@ def assess(job_dir: Path, evidence_dir: Path, trust_dir: Path, repo: str,
     m, manifest_hash, by_stage = manifest_for(job_dir)
     gh_path, source = github_receipt(job_dir, evidence_dir, manifest_hash, by_stage)
     github_verifier(gh_path, repo, source)
+    github_verifier(job_dir / "candidate.zip", repo, source)
     previous = sha256(gh_path)
     previous = signed_stage("vm", job_dir, evidence_dir, trust_dir, source,
                             manifest_hash, by_stage["vm"], previous, stage_verifier)
