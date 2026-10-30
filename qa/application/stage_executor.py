@@ -78,6 +78,7 @@ def run_stage(job_dir: Path, evidence_dir: Path, driver_path: Path, trust_dir: P
     manifest, manifest_hash, by_stage = gate.manifest_for(job_dir)
     gh_receipt, source = gate.github_receipt(job_dir, evidence_dir, manifest_hash, by_stage)
     github_verifier(gh_receipt, repo, source)
+    github_verifier(job_dir/"candidate.zip", repo, source)
     previous = gate.sha256(gh_receipt)
     if stage == "host":
         previous = gate.signed_stage("vm", job_dir, evidence_dir, trust_dir,
