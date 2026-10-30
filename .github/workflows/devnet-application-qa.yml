@@ -1,0 +1,114 @@
+name: Devnet Master QA — registered application GitHub first
+on:
+  push:
+    branches: [qa/master-unified-v0.2.4-github-first]
+    paths:
+      - 'qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip'
+      - 'qa/application/jobs/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  execute-application-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify and extract exact immutable QA extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
+          echo "02f0490f8fb7566a016419ebdd5a3851a55f5a3845b106af7c5c11c760c04ac4  $f" | sha256sum -c -
+          test ! -e qa/application/jobs/selftest
+          test ! -e qa/application/registered_gate.py
+          unzip -nq "$f"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Exercise entire registered application gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVNET_PINNED_MASTER_ZIP="$PWD/qa/master/devnet-master-qa-unified-v0.3.8-QA-BLOCKED.zip"
+          python3 -m unittest discover -s qa/application -p 'test_*.py' -v
+          python3 qa/application/ci_all.py --mode run
+          python3 qa/application/ci_all.py --mode verify-local
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Report fail-closed stage
+        if: always()
+        run: echo 'GitHub application stage only. Real VM, GUI, host, install/rollback and full release remain BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+
+  attest-application-tests:
+    needs: execute-application-tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify and extract exact immutable QA extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
+          echo "02f0490f8fb7566a016419ebdd5a3851a55f5a3845b106af7c5c11c760c04ac4  $f" | sha256sum -c -
+          test ! -e qa/application/jobs/selftest
+          test ! -e qa/application/registered_gate.py
+          unzip -nq "$f"
+      - uses: actions/download-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence
+      - name: Verify all log hashes before signing
+        run: python3 qa/application/ci_all.py --mode verify-local
+      - uses: actions/attest@v4
+        with:
+          subject-path: qa/application/jobs/*/candidate.zip
+      - uses: actions/attest@v4
+        with:
+          subject-path: qa-stage-evidence/*/receipt.json
+
+  verify-signed-application-tests:
+    needs: attest-application-tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify and extract exact immutable QA extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
+          echo "02f0490f8fb7566a016419ebdd5a3851a55f5a3845b106af7c5c11c760c04ac4  $f" | sha256sum -c -
+          test ! -e qa/application/jobs/selftest
+          test ! -e qa/application/registered_gate.py
+          unzip -nq "$f"
+      - uses: actions/download-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence
+      - name: Independently verify signed exact GitHub-stage evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 qa/application/ci_all.py --mode verify-signed
+          echo 'SIGNED_REGISTERED_APPLICATION_GITHUB_STAGE: VERIFIED_SCOPE_LIMITED' >> "$GITHUB_STEP_SUMMARY"
