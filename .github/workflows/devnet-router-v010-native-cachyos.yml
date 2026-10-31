@@ -5,6 +5,7 @@ on:
     branches: [qa/registered-app-executor-fix-v0.1.0]
     paths:
       - 'qa/router-stage-v0.1.0/candidate.zip'
+      - '.github/workflows/devnet-router-v010-native-cachyos.yml'
   workflow_dispatch:
 
 permissions:
@@ -38,8 +39,9 @@ jobs:
               assert z.testzip() is None
               assert all(not x.is_dir() and stat.S_IFMT(x.external_attr >> 16)
                          in (0,stat.S_IFREG) for x in entries)
-              hashes=dict(line.split() for line in
-                          z.read('devnet-router-stage-v0.1.0/SHA256SUMS.txt').decode().splitlines())
+              hashes={name: digest for digest,name in
+                      (line.split() for line in
+                       z.read('devnet-router-stage-v0.1.0/SHA256SUMS.txt').decode().splitlines())}
               for name,expected_sha in hashes.items():
                   data=z.read('devnet-router-stage-v0.1.0/'+name)
                   assert hashlib.sha256(data).hexdigest()==expected_sha,name
