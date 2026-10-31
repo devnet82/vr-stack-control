@@ -1,0 +1,226 @@
+name: Devnet Safe AI v0.1.2 exact archive — GitHub-first native CachyOS QA
+
+on:
+  push:
+    branches: [qa/registered-app-executor-fix-v0.1.0]
+    paths:
+      - 'qa/devnet-safe-ai-v0.1.2/**'
+      - '.github/workflows/devnet-safe-ai-v012-native-cachyos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-exact-private-safe-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Decode exact original candidate; integrity, scope and privacy preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p input
+          base64 -d qa/devnet-safe-ai-v0.1.2/candidate.zip.b64 > input/candidate.zip
+          echo 'fd227dfc54e26e10198ebc0623088aea7884fa62840b7999b32d8a2d0618a8ae  input/candidate.zip' | sha256sum -c -
+          python3 - <<'PY'
+          import hashlib,io,pathlib,re,stat,zipfile
+          p=pathlib.Path('input/candidate.zip')
+          expected={'devnet-safe-ai-v0.1.2.py','test_devnet_safe_ai_v0.1.2.py','SHA256SUMS','DEVNET-SAFE-AI-v0.1.2-README.md'}
+          with zipfile.ZipFile(p) as z:
+              entries=z.infolist()
+              assert len(entries)==4 and {i.filename for i in entries}==expected
+              assert z.testzip() is None
+              assert all(not i.is_dir() and stat.S_IFMT(i.external_attr >> 16) in (0,stat.S_IFREG) for i in entries)
+              sums=z.read('SHA256SUMS').decode().splitlines()
+              assert len(sums)==3
+              for line in sums:
+                  digest,name=line.split()
+                  assert name in expected-{'SHA256SUMS'}
+                  assert hashlib.sha256(z.read(name)).hexdigest()==digest,name
+              for name in ('devnet-safe-ai-v0.1.2.py','test_devnet_safe_ai_v0.1.2.py'):
+                  compile(z.read(name),name,'exec')
+              all_text='\n'.join(z.read(name).decode() for name in expected if name!='SHA256SUMS')
+              assert not re.search(r'/home/(?!agent\b)[a-zA-Z0-9_.-]+',all_text)
+              assert not re.search(r'-----BEGIN [^-]*PRIVATE KEY|github_pat_[A-Za-z0-9_]{15,}|gh[psu]_[A-Za-z0-9]{15,}',all_text)
+          print('EXACT_ARCHIVE_SHA256_PASS; PRIVACY_PREFLIGHT_PASS; GITHUB_VM_NOT_YET_TESTED')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devnet-safe-v012-exact-candidate
+          path: input/candidate.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  real-cachyos-vm-30-regressions:
+    needs: verify-exact-private-safe-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devnet-safe-v012-exact-candidate
+          path: input
+      - name: KVM preflight and genuine CachyOS live guest preparation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'fd227dfc54e26e10198ebc0623088aea7884fa62840b7999b32d8a2d0618a8ae  input/candidate.zip' | sha256sum -c -
+          test -c /dev/kvm
+          if ! test -r /dev/kvm -a -w /dev/kvm; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends qemu-system-x86 qemu-utils mtools dosfstools
+          root=/tmp/devnet-safe-v012-native
+          mkdir -p "$root" evidence
+          base=https://iso.cachyos.org/desktop/260809
+          name=cachyos-desktop-linux-260809.iso
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 "$base/$name.sha256" -o "$root/$name.sha256"
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 "$base/$name" -o "$root/$name"
+          (cd "$root" && sha256sum -c "$name.sha256") | tee evidence/iso-checksum.log
+          pinned=https://raw.githubusercontent.com/devnet82/devnet-cachyos-repair/d8e4447d19e77a77dc355dc07e72c0c5c3edf741/qa/portfolio-cachyos-vm-v0.1.0
+          curl -fLsS "$pinned/qemu_control.py" -o "$root/qemu_control.py"
+          python3 -m py_compile "$root/qemu_control.py"
+          truncate -s 128M "$root/control.img"
+          mkfs.vfat -F 32 -n DEVNETQA "$root/control.img" >/dev/null
+          mcopy -i "$root/control.img" input/candidate.zip ::/candidate.zip
+          cat > "$root/guest-test.sh" <<'GUEST'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec > /mnt/controller.log 2>&1
+          trap 'rc=$?; echo SAFEAI_GUEST_EXIT=$rc; sync' EXIT
+          grep -Eq '^ID=cachyos$' /etc/os-release
+          echo "REAL_CACHYOS_GUEST_KERNEL=$(uname -r)"
+          python3 - <<'PY'
+          import hashlib,pathlib,zipfile
+          p=pathlib.Path('/mnt/candidate.zip')
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='fd227dfc54e26e10198ebc0623088aea7884fa62840b7999b32d8a2d0618a8ae'
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              z.extractall('/tmp/devnet-safe-ai-v012')
+          print('REAL_CACHYOS_EXACT_ZIP_PASS')
+          PY
+          cd /tmp/devnet-safe-ai-v012
+          python3 test_devnet_safe_ai_v0.1.2.py > /mnt/unit-tests.log 2>&1
+          cat /mnt/unit-tests.log
+          grep -q 'Ran 30 tests' /mnt/unit-tests.log
+          grep -qx 'OK' /mnt/unit-tests.log
+          python3 - <<'PY'
+          import json,pathlib
+          result={'schema':'devnet-safe-ai-v012-github-cachyos-unit-scope-v1',
+                  'candidate_sha256':'fd227dfc54e26e10198ebc0623088aea7884fa62840b7999b32d8a2d0618a8ae',
+                  'native_cachyos':True,'unit_tests_pass':30,'unit_tests_fail':0,
+                  'ollama_host_live':'NOT_TESTED','opencode_full_runtime':'NOT_TESTED',
+                  'vm_host_master_qa':'NOT_TESTED','install_upgrade_rollback':'NOT_TESTED',
+                  'master_qa':'BLOCKED','release_approved':False}
+          pathlib.Path('/mnt/native-result.json').write_text(json.dumps(result,sort_keys=True)+'\n')
+          print('REAL_GITHUB_NATIVE_CACHYOS_30_REGRESSIONS_PASS_LIMITED')
+          PY
+          GUEST
+          bash -n "$root/guest-test.sh"
+          mcopy -i "$root/control.img" "$root/guest-test.sh" ::/install-guest.sh
+      - name: Boot real CachyOS guest with isolated networking and execute fresh 30-test suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/devnet-safe-v012-native
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file="$root/cachyos-desktop-linux-260809.iso",media=cdrom,if=ide \
+            -drive if=none,id=ctl,file="$root/control.img",format=raw \
+            -device virtio-blk-pci,drive=ctl,serial=DEVNETCONTROL \
+            -nic none -boot order=d -vga std -display none \
+            -serial file:evidence/serial.log \
+            -monitor unix:"$root/qemu-monitor.sock",server=on,wait=off \
+            -daemonize -pidfile "$root/qemu.pid"
+          sleep 110
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" framebuffer --image evidence/guest-before.ppm
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" begin-install
+          captured=0
+          for attempt in $(seq 1 75); do
+            mcopy -o -i "$root/control.img" ::/controller.log evidence/controller.log >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/unit-tests.log evidence/unit-tests.log >/dev/null 2>&1 || true
+            if mcopy -o -i "$root/control.img" ::/native-result.json evidence/native-result.json >/dev/null 2>&1; then
+              if python3 -m json.tool evidence/native-result.json >/dev/null 2>&1; then
+                captured=1; break
+              fi
+            fi
+            sleep 8
+          done
+          test "$captured" -eq 1
+          python3 - <<'PY'
+          import json
+          r=json.load(open('evidence/native-result.json'))
+          assert r['schema']=='devnet-safe-ai-v012-github-cachyos-unit-scope-v1'
+          assert r['candidate_sha256']=='fd227dfc54e26e10198ebc0623088aea7884fa62840b7999b32d8a2d0618a8ae'
+          assert r['native_cachyos'] is True and r['unit_tests_pass']==30
+          assert r['master_qa']=='BLOCKED' and r['release_approved'] is False
+          assert 'Ran 30 tests' in open('evidence/unit-tests.log').read()
+          print('GITHUB_CACHYOS_30_OF_30_TESTS_PASS_LIMITED_FULL_MASTER_QA_BLOCKED')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: devnet-safe-v012-real-cachyos-evidence
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: warn
+
+  independent-evidence-and-scope-gate:
+    needs: [verify-exact-private-safe-package, real-cachyos-vm-30-regressions]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: devnet-safe-v012-exact-candidate
+          path: input
+      - uses: actions/download-artifact@v4
+        with:
+          name: devnet-safe-v012-real-cachyos-evidence
+          path: evidence
+      - name: Verify independent guest evidence; fail closed on missing scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          p=pathlib.Path('input/candidate.zip')
+          h=hashlib.sha256(p.read_bytes()).hexdigest()
+          assert h=='fd227dfc54e26e10198ebc0623088aea7884fa62840b7999b32d8a2d0618a8ae'
+          r=json.loads(pathlib.Path('evidence/native-result.json').read_text())
+          assert r['candidate_sha256']==h and r['native_cachyos'] is True
+          assert r['unit_tests_pass']==30 and r['unit_tests_fail']==0
+          assert r['ollama_host_live']=='NOT_TESTED' and r['opencode_full_runtime']=='NOT_TESTED'
+          assert r['install_upgrade_rollback']=='NOT_TESTED'
+          assert r['master_qa']=='BLOCKED' and r['release_approved'] is False
+          log=pathlib.Path('evidence/unit-tests.log').read_text()
+          assert 'Ran 30 tests' in log and '\nOK\n' in log
+          assert 'REAL_CACHYOS_EXACT_ZIP_PASS' in pathlib.Path('evidence/controller.log').read_text()
+          pathlib.Path('scope-receipt.json').write_text(json.dumps({
+            'schema':'devnet-safe-v012-github-scope-v1','archive_sha256':h,
+            'native_cachyos_unit_tests_pass':30,'full_master_qa':'BLOCKED',
+            'runtime_gui_host_integration':'NOT_TESTED', 'release_approved':False},sort_keys=True)+'\n')
+          print('INDEPENDENT_SCOPE_GATE_PASS_LIMITED; NO_RELEASE')
+          PY
+      - uses: actions/attest@v4
+        with:
+          subject-path: input/candidate.zip
+      - uses: actions/attest@v4
+        with:
+          subject-path: scope-receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devnet-safe-v012-signed-github-scope
+          path: scope-receipt.json
+          if-no-files-found: error
+      - run: echo '30/30 tests only in genuine GitHub-hosted CachyOS VM. Host install/upgrade/rollback, security runtime, and Master QA are NOT TESTED; release BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
