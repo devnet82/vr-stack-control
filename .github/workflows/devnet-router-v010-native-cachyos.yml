@@ -1,0 +1,231 @@
+name: Devnet router v0.1.0 exact ZIP native CachyOS — GitHub FIRST
+
+on:
+  push:
+    branches: [qa/registered-app-executor-fix-v0.1.0]
+    paths:
+      - 'qa/router-stage-v0.1.0/candidate.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-exact-zip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Verify exact unchanged router archive, safety, file identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate=qa/router-stage-v0.1.0/candidate.zip
+          test -f "$candidate"
+          echo '719f0d8a44d6431993654975d49555db19b7c5885c243f07fe3bcea6a09463cd  qa/router-stage-v0.1.0/candidate.zip' | sha256sum -c -
+          python3 - <<'PY'
+          import hashlib,io,pathlib,stat,zipfile
+          p=pathlib.Path('qa/router-stage-v0.1.0/candidate.zip')
+          with zipfile.ZipFile(p) as z:
+              entries=z.infolist()
+              assert len(entries)==5
+              expected={'devnet-router-stage-v0.1.0/'+x for x in
+                        ('README.md','LOCAL_DEVELOPMENT_TEST_RESULTS.txt',
+                         'SHA256SUMS.txt','orchestrator.py','test_orchestrator.py')}
+              assert {x.filename for x in entries}==expected
+              assert z.testzip() is None
+              assert all(not x.is_dir() and stat.S_IFMT(x.external_attr >> 16)
+                         in (0,stat.S_IFREG) for x in entries)
+              hashes=dict(line.split() for line in
+                          z.read('devnet-router-stage-v0.1.0/SHA256SUMS.txt').decode().splitlines())
+              for name,expected_sha in hashes.items():
+                  data=z.read('devnet-router-stage-v0.1.0/'+name)
+                  assert hashlib.sha256(data).hexdigest()==expected_sha,name
+              for name in ('orchestrator.py','test_orchestrator.py'):
+                  compile(z.read('devnet-router-stage-v0.1.0/'+name),name,'exec')
+          print('EXACT_ROUTER_ZIP_SAFE: PASS; NATIVE_VM: NOT_TESTED')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: router-v010-exact-original-zip
+          path: qa/router-stage-v0.1.0/candidate.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  native-cachyos-unit-tests:
+    needs: verify-exact-zip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: router-v010-exact-original-zip
+          path: input
+      - name: Confirm original candidate + virtualisation capabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '719f0d8a44d6431993654975d49555db19b7c5885c243f07fe3bcea6a09463cd  input/candidate.zip' | sha256sum -c -
+          test -c /dev/kvm
+          if ! test -r /dev/kvm -a -w /dev/kvm; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+      - name: Prepare pinned genuine CachyOS guest (no network or host directory mounts)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends qemu-system-x86 qemu-utils mtools dosfstools
+          root=/tmp/devnet-router-native
+          mkdir -p "$root" evidence
+          base=https://iso.cachyos.org/desktop/260809
+          name=cachyos-desktop-linux-260809.iso
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 "$base/$name.sha256" -o "$root/$name.sha256"
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 "$base/$name" -o "$root/$name"
+          (cd "$root" && sha256sum -c "$name.sha256") | tee evidence/iso-checksum.log
+          pinned=https://raw.githubusercontent.com/devnet82/devnet-cachyos-repair/d8e4447d19e77a77dc355dc07e72c0c5c3edf741/qa/portfolio-cachyos-vm-v0.1.0
+          curl -fLsS "$pinned/qemu_control.py" -o "$root/qemu_control.py"
+          python3 -m py_compile "$root/qemu_control.py"
+          truncate -s 128M "$root/control.img"
+          mkfs.vfat -F 32 -n DEVNETQA "$root/control.img" >/dev/null
+          mcopy -i "$root/control.img" input/candidate.zip ::/candidate.zip
+          cat > "$root/guest-test.sh" <<'GUEST'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec > /mnt/controller.log 2>&1
+          trap 'rc=$?; echo ROUTER_GUEST_EXIT=$rc; sync' EXIT
+          grep -Eq '^ID=cachyos$' /etc/os-release
+          echo "REAL_CACHYOS_GUEST=$(uname -r)"
+          python3 - <<'PY'
+          import hashlib,pathlib,zipfile
+          p=pathlib.Path('/mnt/candidate.zip')
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='719f0d8a44d6431993654975d49555db19b7c5885c243f07fe3bcea6a09463cd'
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              z.extractall('/tmp/router-tests')
+          print('REAL_CACHYOS_EXACT_ZIP_PASS')
+          PY
+          cd /tmp/router-tests/devnet-router-stage-v0.1.0
+          python3 -m unittest -v test_orchestrator > /mnt/unit-tests.log 2>&1
+          cat /mnt/unit-tests.log
+          grep -q 'Ran 23 tests' /mnt/unit-tests.log
+          grep -qx 'OK' /mnt/unit-tests.log
+          python3 - <<'PY'
+          import json,pathlib
+          result={'schema':'devnet-v010-native-cachyos-units-v1',
+                  'candidate_sha256':'719f0d8a44d6431993654975d49555db19b7c5885c243f07fe3bcea6a09463cd',
+                  'native_cachyos':True,'unit_tests_pass':23,
+                  'ollama_live_model_test':'NOT_TESTED',
+                  'application_creation_and_repair':'NOT_TESTED',
+                  'master_qa':'BLOCKED','release_approved':False}
+          pathlib.Path('/mnt/native-result.json').write_text(json.dumps(result,sort_keys=True)+'\n')
+          print('CACHYOS_NATIVE_ROUTER_23_23: PASS_LIMITED')
+          PY
+          GUEST
+          bash -n "$root/guest-test.sh"
+          mcopy -i "$root/control.img" "$root/guest-test.sh" ::/install-guest.sh
+      - name: Boot real CachyOS live ISO and execute full 23-test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/devnet-router-native
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file="$root/cachyos-desktop-linux-260809.iso",media=cdrom,if=ide \
+            -drive if=none,id=ctl,file="$root/control.img",format=raw \
+            -device virtio-blk-pci,drive=ctl,serial=DEVNETCONTROL \
+            -nic none -boot order=d -vga std -display none \
+            -serial file:evidence/serial.log \
+            -monitor unix:"$root/qemu-monitor.sock",server=on,wait=off \
+            -daemonize -pidfile "$root/qemu.pid"
+          sleep 110
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" framebuffer --image evidence/guest-before.ppm
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" begin-install
+          captured=0
+          for attempt in $(seq 1 75); do
+            mcopy -o -i "$root/control.img" ::/controller.log evidence/controller.log >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/unit-tests.log evidence/unit-tests.log >/dev/null 2>&1 || true
+            if mcopy -o -i "$root/control.img" ::/native-result.json evidence/native-result.json >/dev/null 2>&1; then
+              if python3 -m json.tool evidence/native-result.json >/dev/null 2>&1; then
+                captured=1; break
+              fi
+            fi
+            sleep 8
+          done
+          test "$captured" -eq 1
+          python3 - <<'PY'
+          import json
+          r=json.load(open('evidence/native-result.json'))
+          assert r['schema']=='devnet-v010-native-cachyos-units-v1'
+          assert r['candidate_sha256']=='719f0d8a44d6431993654975d49555db19b7c5885c243f07fe3bcea6a09463cd'
+          assert r['native_cachyos'] is True
+          assert r['unit_tests_pass']==23
+          assert r['master_qa']=='BLOCKED' and r['release_approved'] is False
+          print('REAL_GITHUB_CACHYOS_ROUTER_UNITS: 23/23 PASS_LIMITED; FULL MASTER QA BLOCKED')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: router-v010-genuine-cachyos-evidence
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: warn
+
+  independent-scope-gate:
+    needs: [verify-exact-zip, native-cachyos-unit-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: router-v010-exact-original-zip
+          path: input
+      - uses: actions/download-artifact@v4
+        with:
+          name: router-v010-genuine-cachyos-evidence
+          path: evidence
+      - name: Independently verify candidate and guest result scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          zipfile=pathlib.Path('input/candidate.zip')
+          h=hashlib.sha256(zipfile.read_bytes()).hexdigest()
+          assert h=='719f0d8a44d6431993654975d49555db19b7c5885c243f07fe3bcea6a09463cd'
+          r=json.loads(pathlib.Path('evidence/native-result.json').read_text())
+          assert r['native_cachyos'] and r['unit_tests_pass']==23
+          assert r['candidate_sha256']==h
+          assert r['ollama_live_model_test']=='NOT_TESTED'
+          assert r['application_creation_and_repair']=='NOT_TESTED'
+          assert r['master_qa']=='BLOCKED' and r['release_approved'] is False
+          assert 'Ran 23 tests' in pathlib.Path('evidence/unit-tests.log').read_text()
+          pathlib.Path('scope-receipt.json').write_text(json.dumps({
+            'schema':'devnet-native-router-scope-v1',
+            'original_sha256':h,'native_cachyos_tests_pass':23,
+            'scope':'UNIT_TESTS_ONLY_WITH_MOCK_OLLAMA',
+            'full_master_qa':'BLOCKED','release_approved':False},sort_keys=True)+'\n')
+          print('INDEPENDENT_NATIVE_CACHYOS_SCOPE_PASS_LIMITED')
+          PY
+      - uses: actions/attest@v4
+        with:
+          subject-path: input/candidate.zip
+      - uses: actions/attest@v4
+        with:
+          subject-path: scope-receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: router-v010-signed-limited-scope
+          path: scope-receipt.json
+          if-no-files-found: error
+      - run: echo 'Signed scope is native unit tests with mocked Ollama. NO host model/integration/app repair. Full Master QA BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
