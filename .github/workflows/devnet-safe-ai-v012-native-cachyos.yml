@@ -6,6 +6,11 @@ on:
     paths:
       - 'qa/devnet-safe-ai-v0.1.2/**'
       - '.github/workflows/devnet-safe-ai-v012-native-cachyos.yml'
+  pull_request:
+    branches: [qa/master-unified-v0.2.4-github-first]
+    paths:
+      - 'qa/devnet-safe-ai-v0.1.2/**'
+      - '.github/workflows/devnet-safe-ai-v012-native-cachyos.yml'
   workflow_dispatch:
 
 permissions:
