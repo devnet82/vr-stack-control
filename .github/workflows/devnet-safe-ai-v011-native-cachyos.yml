@@ -15,19 +15,7 @@ jobs:
   verify-exact-private-safe-package:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
     steps:
-      - name: Record exact QA run ID on existing draft PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const url = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo, issue_number: 3,
-              body: `DEVNET SAFE AI v0.1.1 GitHub-first QA run started (NOT a PASS): ${url}\\nHead commit: ${context.sha}\\nCandidate SHA256: cc9d7a183963a923c5f1b9bd4aa30d4f11156bd8ef81e4a2bc3f5b2907a9aba1\\nFull Master QA remains BLOCKED.`
-            });
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
