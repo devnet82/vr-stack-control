@@ -135,3 +135,29 @@ A preserved `devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zi
 exists in the ChatGPT Library, but its original bytes could not be materialised
 through the present connection. Do not represent it as inspected or assume
 that its contents were installed or integrated.
+
+## Mandatory QA-runner reality gate — 31 October 2026 (additive, QA BLOCKED)
+
+The candidate Master QA extension is `qa/master/QA_RUNNER_REALITY_RULE_v0.1.0.md`.
+This is a mandatory **planned acceptance requirement for all QA-runner modifications**,
+not permission to skip the pre-existing protected checklist or a declaration that
+the immutable Master QA v0.3.8 ZIP has been updated/deployed.
+
+**Incident:** The r2 Devnet Safe AI v0.1.2 runner rejected real CachyOS OpenCode
+output `opencode v2.2.4` despite passing 30 unit regressions. Real dependency
+output was not tested before handing over the runner. Mark r2 VM runtime BLOCKED.
+
+**New acceptance IDs when the runner/tooling changes:**
+`runner_real_dependency_output`, `runner_negative_contracts`,
+`runner_independent_evidence`. Run the exact runner with actual target VM
+dependency output and capture binary/runner/candidate hashes and raw CLI
+stdout/stderr. Reject wrong major versions, missing tools, nonzero exits,
+malformed and reused output. Run 100% fresh job-specific tests after each
+revision GitHub first, local CachyOS VM second, authorised host third. Every
+unverified test stays FAIL/BLOCKED/NOT_TESTED, not inherited PASS.
+
+`qa/master/runner_reality_gate.py` is a scoped unsigned live-output probe and
+re-execution checker, not a signing service and not the protected Master QA.
+The new policy, probe and development tests are **staged on this QA branch only**.
+Integration with the independent signer and protected Master QA baseline,
+real host/VM tests, and final release acceptance remain BLOCKED.
