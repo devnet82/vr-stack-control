@@ -1,55 +1,55 @@
-name: Devnet Master QA — registered application GitHub first
+name: Devnet registered application GitHub stage (fail closed)
 on:
-  push:
-    branches: [qa/master-unified-v0.2.4-github-first]
-    paths:
-      - 'qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip'
-      - 'qa/application/jobs/**'
   workflow_dispatch:
+  push:
+    branches: [qa/registered-app-executor-fix-v0.1.0]
+    paths:
+      - 'qa/application/jobs/**'
+      - 'qa/application/registered_gate.py'
+      - 'qa/application/candidate_checks.py'
+      - '.github/workflows/devnet-application-qa.yml'
 permissions:
   contents: read
 jobs:
-  execute-application-tests:
+  application-github:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - name: Verify and extract exact immutable QA extension
-        shell: bash
-        run: |
-          set -euo pipefail
-          f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
-          echo "10bb63d065a264a9870c24a9b11dae045e654cef4e4e8b2c6e07a12ec4946411  $f" | sha256sum -c -
-          test ! -e qa/application/jobs/selftest
-          test ! -e qa/application/registered_gate.py
-          unzip -nq "$f"
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - name: Exercise entire registered application gate
+      - name: Install pinned cryptographic test dependency
+        run: python -m pip install --disable-pip-version-check 'cryptography==50.0.2'
+      - name: Validate fail-closed gate
+        run: python3 -m unittest discover -s qa/application -p 'test_*.py' -v
+      - name: Execute registered candidate GitHub checklist
         shell: bash
         run: |
           set -euo pipefail
-          export DEVNET_PINNED_MASTER_ZIP="$PWD/qa/master/devnet-master-qa-unified-v0.3.8-QA-BLOCKED.zip"
-          python3 -m unittest discover -s qa/application -p 'test_*.py' -v
-          python3 qa/application/ci_all.py --mode run
-          python3 qa/application/ci_all.py --mode verify-local
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          if (( ${#manifests[@]} != 1 )); then
+            echo 'BLOCKED: exactly one actual candidate must be registered' >&2
+            exit 1
+          fi
+          python3 qa/application/registered_gate.py run "${manifests[0]}"
+          python3 qa/application/registered_gate.py verify "${manifests[0]}"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: registered-application-github-evidence
           path: qa-stage-evidence/
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90
-      - name: Report fail-closed stage
+      - name: Preserve release block
         if: always()
-        run: echo 'GitHub application stage only. Real VM, GUI, host, install/rollback and full release remain BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'GitHub-only stage; VM, host and operator acceptance NOT verified. RELEASE BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
 
-  attest-application-tests:
-    needs: execute-application-tests
+  sign-candidate-evidence:
+    needs: application-github
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -59,30 +59,26 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - name: Verify and extract exact immutable QA extension
-        shell: bash
-        run: |
-          set -euo pipefail
-          f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
-          echo "10bb63d065a264a9870c24a9b11dae045e654cef4e4e8b2c6e07a12ec4946411  $f" | sha256sum -c -
-          test ! -e qa/application/jobs/selftest
-          test ! -e qa/application/registered_gate.py
-          unzip -nq "$f"
       - uses: actions/download-artifact@v4
         with:
           name: registered-application-github-evidence
           path: qa-stage-evidence
-      - name: Verify all log hashes before signing
-        run: python3 qa/application/ci_all.py --mode verify-local
+      - name: Recheck candidate and stage receipt before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          test "${#manifests[@]}" -eq 1
+          python3 qa/application/registered_gate.py verify "${manifests[0]}"
       - uses: actions/attest@v4
         with:
           subject-path: qa/application/jobs/*/candidate.zip
       - uses: actions/attest@v4
         with:
           subject-path: qa-stage-evidence/*/receipt.json
-
-  verify-signed-application-tests:
-    needs: attest-application-tests
+  independent-signature-check:
+    needs: sign-candidate-evidence
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -91,24 +87,68 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - name: Verify and extract exact immutable QA extension
-        shell: bash
-        run: |
-          set -euo pipefail
-          f=qa/application/devnet-master-qa-registered-application-stages-v0.1.0-QA-BLOCKED.zip
-          echo "10bb63d065a264a9870c24a9b11dae045e654cef4e4e8b2c6e07a12ec4946411  $f" | sha256sum -c -
-          test ! -e qa/application/jobs/selftest
-          test ! -e qa/application/registered_gate.py
-          unzip -nq "$f"
       - uses: actions/download-artifact@v4
         with:
           name: registered-application-github-evidence
           path: qa-stage-evidence
-      - name: Independently verify signed exact GitHub-stage evidence
+      - name: Verify candidate-bound GitHub-issued signatures
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 qa/application/ci_all.py --mode verify-signed
-          echo 'SIGNED_REGISTERED_APPLICATION_GITHUB_STAGE: VERIFIED_SCOPE_LIMITED' >> "$GITHUB_STEP_SUMMARY"
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          test "${#manifests[@]}" -eq 1
+          python3 qa/application/registered_gate.py verify "${manifests[0]}"
+          zips=(qa/application/jobs/*/candidate.zip)
+          receipts=(qa-stage-evidence/*/receipt.json)
+          test "${#zips[@]}" -eq 1
+          test "${#receipts[@]}" -eq 1
+          gh attestation verify "${zips[0]}" --repo "${GITHUB_REPOSITORY}" --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devnet-application-qa.yml" --source-digest "$GITHUB_SHA"
+          gh attestation verify "${receipts[0]}" --repo "${GITHUB_REPOSITORY}" --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/devnet-application-qa.yml" --source-digest "$GITHUB_SHA"
+          echo 'SIGNED_GITHUB_STAGE_VERIFIED. REAL VM/HOST/RELEASE STILL BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  package-private-vm-handoff:
+    # Only after independent GitHub signature verification.
+    # This transport artifact is NOT VM test evidence or release approval.
+    needs: independent-signature-check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: registered-application-github-evidence
+          path: qa-stage-evidence
+      - name: Prepare candidate-specific handoff (no VM execution)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          manifests=(qa/application/jobs/*/manifest.json)
+          receipts=(qa-stage-evidence/*/receipt.json)
+          test "${#manifests[@]}" -eq 1
+          test "${#receipts[@]}" -eq 1
+          work="$(mktemp -d)"
+          mkdir -p "$work/github"
+          cp -- "${receipts[0]}" "$work/github/receipt.json"
+          jobdir="$(dirname -- "${manifests[0]}")"
+          test -f "$jobdir/policy.json" -a -f "$jobdir/policy.sig"
+          python3 qa/application/handoff.py assemble \
+            --job-dir "$jobdir" \
+            --evidence-dir "$work" \
+            --handoff-dir "$RUNNER_TEMP/private-vm-handoff"
+          echo 'GitHub handoff prepared; VM/host NOT_TESTED, release BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devnet-private-vm-handoff
+          path: ${{ runner.temp }}/private-vm-handoff
+          retention-days: 30
+          if-no-files-found: error

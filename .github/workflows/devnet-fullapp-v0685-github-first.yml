@@ -1,0 +1,292 @@
+name: Devnet full-application baseline v0.6.85 — GitHub FIRST (release blocked)
+on:
+  push:
+    branches: [qa/registered-app-executor-fix-v0.1.0]
+    paths:
+      - '.github/workflows/devnet-fullapp-v0685-github-first.yml'
+      - 'qa/application/candidate_checks.py'
+      - 'qa/application/v0685_baseline_inspect.py'
+      - 'qa/application/v0685_installed_lifecycle.py'
+      - 'qa/application/guest_v0685_package.py'
+      - 'qa/application/guest_v0685_lifecycle.py'
+      - 'qa/application/v0685_stage_gate.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  exact-candidate-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Fetch preserved published full application (never rebuild)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p baseline-evidence
+          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 180 \
+            'https://github.com/devnet82/vr-stack-control/releases/download/v0.6.85/vr-stack-control-v0.6.85.zip' \
+            -o baseline-evidence/candidate.zip
+          echo 'db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3  baseline-evidence/candidate.zip' | sha256sum --check -
+          test "$(stat --format=%s baseline-evidence/candidate.zip)" -eq 53403
+      - name: Run genuine archive integrity, safety and source-syntax checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 qa/application/candidate_checks.py integrity baseline-evidence/candidate.zip
+          python3 qa/application/candidate_checks.py safety baseline-evidence/candidate.zip
+          python3 qa/application/candidate_checks.py python_syntax baseline-evidence/candidate.zip
+          python3 qa/application/v0685_baseline_inspect.py \
+            baseline-evidence/candidate.zip baseline-evidence/inspection.json
+          python3 -m json.tool baseline-evidence/inspection.json
+      - name: Install and uninstall EXACT ZIP in disposable unprivileged HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 qa/application/v0685_installed_lifecycle.py \
+            baseline-evidence/candidate.zip baseline-evidence/disposable-lifecycle
+          python3 -m json.tool baseline-evidence/disposable-lifecycle/lifecycle-receipt.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v0685-original-github-input-and-structure
+          path: baseline-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Fail closed after input checks
+        if: always()
+        run: |
+          echo 'Original full-app ZIP integrity and Ubuntu disposable-home install/reinstall/uninstall checks only.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Real GitHub-hosted CachyOS install/upgrade/rollback/GUI and user VM/host checks NOT_TESTED. RELEASE BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  native-cachyos-liveiso:
+    needs: exact-candidate-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-original-github-input-and-structure
+          path: original-input
+      - name: Verify exact v0.6.85 artifact and disposable KVM capabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'db9af6ff47f3abcf07cf452ddd91e91cbd75a10296c0c6050bb5c612980d9cf3  original-input/candidate.zip' | sha256sum -c -
+          echo '=== GitHub runner KVM device ==='
+          id
+          ls -l /dev/kvm || true
+          test -c /dev/kvm || { echo 'BLOCKED: GitHub hosted runner has NO /dev/kvm' >&2; exit 2; }
+          if ! test -r /dev/kvm -a -w /dev/kvm; then
+            # Grant only this disposable GitHub runner process access.
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          test -r /dev/kvm -a -w /dev/kvm
+          echo 'GITHUB_HOST_KVM_AVAILABLE (not yet a guest test)'
+      - name: Install isolated QEMU and FAT-disk tools on GitHub runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y --no-install-recommends qemu-system-x86 qemu-utils mtools dosfstools
+      - name: Prepare independently verified CachyOS ISO and pinned guest harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-evidence /tmp/devnet-native-v0685
+          base=https://iso.cachyos.org/desktop/260809
+          name=cachyos-desktop-linux-260809.iso
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 \
+            "$base/$name.sha256" -o "/tmp/devnet-native-v0685/$name.sha256"
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 1200 \
+            "$base/$name" -o "/tmp/devnet-native-v0685/$name"
+          (cd /tmp/devnet-native-v0685 && sha256sum -c "$name.sha256") | tee native-evidence/iso-sha256.txt
+          root="https://raw.githubusercontent.com/devnet82/devnet-cachyos-repair/d8e4447d19e77a77dc355dc07e72c0c5c3edf741/qa/portfolio-cachyos-vm-v0.1.0"
+          curl -fLsS "$root/qemu_control.py" -o /tmp/devnet-native-v0685/qemu_control.py
+          python3 -m py_compile /tmp/devnet-native-v0685/qemu_control.py
+          python3 -m py_compile qa/application/guest_v0685_package.py
+          truncate -s 128M /tmp/devnet-native-v0685/control.img
+          mkfs.vfat -F 32 -n DEVNETQA /tmp/devnet-native-v0685/control.img >/dev/null
+          img=/tmp/devnet-native-v0685/control.img
+          mcopy -i "$img" qa/application/guest_v0685_package.py ::/guest_v0685_package.py
+          python3 -m py_compile qa/application/guest_v0685_lifecycle.py
+          mcopy -i "$img" qa/application/guest_v0685_lifecycle.py ::/guest_v0685_lifecycle.py
+          mcopy -i "$img" original-input/candidate.zip ::/candidate.zip
+          cat > /tmp/devnet-native-v0685/run-guest.sh <<'GUEST'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec >/mnt/controller.log 2>&1
+          trap 'rc=$?; echo VM_GUEST_CONTROLLER_EXIT=$rc; sync' EXIT
+          echo "DEVNET_NATIVE_CACHYOS_ORIGINAL_v0685_QA_START"
+          cat /etc/os-release
+          uname -r
+          python3 /mnt/guest_v0685_package.py /mnt/candidate.zip /mnt/qa-result.json
+          python3 /mnt/guest_v0685_lifecycle.py /mnt/candidate.zip \
+            /mnt/lifecycle-result.json /mnt/lifecycle-tests.log
+          GUEST
+          bash -n /tmp/devnet-native-v0685/run-guest.sh
+          mcopy -i "$img" /tmp/devnet-native-v0685/run-guest.sh ::/install-guest.sh
+          mdir -i "$img" ::/ > native-evidence/control-manifest.txt
+      - name: Boot genuine CachyOS LIVE ISO in isolated QEMU and capture checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/devnet-native-v0685
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 4096 -smp 2 \
+            -drive file="$root/cachyos-desktop-linux-260809.iso",media=cdrom,if=ide \
+            -drive if=none,id=ctl,file="$root/control.img",format=raw \
+            -device virtio-blk-pci,drive=ctl,serial=DEVNETCONTROL \
+            -nic none -boot order=d -vga std -display none \
+            -serial file:native-evidence/serial.log \
+            -monitor unix:"$root/qemu-monitor.sock",server=on,wait=off \
+            -daemonize -pidfile "$root/qemu.pid"
+          sleep 110
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" framebuffer \
+            --image native-evidence/guest-before-tests.ppm
+          python3 "$root/qemu_control.py" "$root/qemu-monitor.sock" begin-install
+          captured=0
+          for attempt in $(seq 1 75); do
+            mcopy -o -i "$root/control.img" ::/controller.log native-evidence/controller.log >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/lifecycle-result.json native-evidence/lifecycle-result.json >/dev/null 2>&1 || true
+            mcopy -o -i "$root/control.img" ::/lifecycle-tests.log native-evidence/lifecycle-tests.log >/dev/null 2>&1 || true
+            if mcopy -o -i "$root/control.img" ::/qa-result.json native-evidence/qa-result.json >/dev/null 2>&1 \
+               && mcopy -o -i "$root/control.img" ::/lifecycle-result.json native-evidence/lifecycle-result.json >/dev/null 2>&1; then
+              if python3 -c 'import json; json.load(open("native-evidence/qa-result.json")); json.load(open("native-evidence/lifecycle-result.json"))' 2>/dev/null; then
+                captured=1
+                break
+              fi
+            fi
+            sleep 8
+          done
+          test "$captured" -eq 1
+          python3 - <<'PY'
+          import json
+          r=json.load(open("native-evidence/qa-result.json"))
+          assert r["schema"]=="devnet-native-cachyos-v0685-package-v1"
+          required=["native_cachyos","control_disk_identity","exact_sha256",
+                    "zip_integrity","full_application_layout","native_syntax",
+                    "version_bin_vr-control","version_bin_vr-control-gui",
+                    "version_bin_vr-stack-tray"]
+          for check in required:
+              print("CACHYOS_GUEST",check,r["checks"].get(check))
+              assert r["checks"][check]["status"]=="PASS", check
+          assert r["release_approved"] is False
+          assert r["overall"]=="PARTIAL"  # Installed OS/GUI remain unverified
+          lifecycle=json.load(open("native-evidence/lifecycle-result.json"))
+          required_lifecycle=["fresh_install","exact_install_hashes","reinstall",
+                              "reinstalled_hashes","configuration_preserved",
+                              "uninstall","uninstall_removes_app_files",
+                              "uninstall_preserves_unrelated_data"]
+          for check in required_lifecycle:
+              print("CACHYOS_GUEST_REAL_INSTALL",check,lifecycle["checks"].get(check))
+              assert lifecycle["checks"][check]["status"]=="PASS",check
+          assert lifecycle["overall"]=="PASS_LIMITED"
+          assert lifecycle["release_approved"] is False
+          print("LIVE_CACHYOS_PACKAGE_GUEST: PASS_LIMITED; MASTER_QA: BLOCKED")
+          PY
+      - name: Preserve authentic native guest evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullapp-v0685-native-cachyos-liveiso-evidence
+          path: native-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Enforce precise stage scope
+        if: always()
+        run: |
+          echo 'A live CachyOS ISO guest is NOT an installed CachyOS KDE application acceptance environment.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Install/upgrade/rollback, genuine KDE GUI/tray and physical host hardware remain NOT_TESTED; release BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  sign-v0685-native-scope:
+    needs: [exact-candidate-baseline, native-cachyos-liveiso]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-original-github-input-and-structure
+          path: original-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: fullapp-v0685-native-cachyos-liveiso-evidence
+          path: native-evidence
+      - name: Independently verify every in-scope real executed check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 qa/application/v0685_stage_gate.py \
+            original-input/candidate.zip \
+            original-input/disposable-lifecycle/lifecycle-receipt.json \
+            native-evidence/qa-result.json \
+            native-evidence/lifecycle-result.json \
+            native-evidence/verified-scope.json
+      - uses: actions/attest@v4
+        with:
+          subject-path: original-input/candidate.zip
+      - uses: actions/attest@v4
+        with:
+          subject-path: native-evidence/verified-scope.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v0685-signed-liveiso-scope-receipt
+          path: native-evidence/verified-scope.json
+          retention-days: 90
+          if-no-files-found: error
+      - name: Preserve release gate
+        run: echo 'Signed evidence is ONLY for historical v0.6.85 Ubuntu and CachyOS LIVE ISO. Full Master QA BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
+  independent-v0685-provenance-verification:
+    needs: sign-v0685-native-scope
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-original-github-input-and-structure
+          path: original-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: v0685-signed-liveiso-scope-receipt
+          path: signed-evidence
+      - name: Verify exact original application and source-bound test receipt signatures
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow="$GITHUB_REPOSITORY/.github/workflows/devnet-fullapp-v0685-github-first.yml"
+          gh attestation verify original-input/candidate.zip --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$workflow" --source-digest "$GITHUB_SHA"
+          gh attestation verify signed-evidence/verified-scope.json --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$workflow" --source-digest "$GITHUB_SHA"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          d=json.loads(pathlib.Path("signed-evidence/verified-scope.json").read_text())
+          z=pathlib.Path("original-input/candidate.zip")
+          assert hashlib.sha256(z.read_bytes()).hexdigest()==d["candidate_sha256"]
+          assert d["github_sha"]==os.environ["GITHUB_SHA"]
+          assert d["github_run_id"]==os.environ["GITHUB_RUN_ID"]
+          assert (d["ubuntu_disposable_install_pass"],
+                  d["real_cachyos_liveiso_package_pass"],
+                  d["real_cachyos_liveiso_lifecycle_pass"]) == (9,9,8)
+          assert d["decision"]=="PASS_LIMITED"
+          assert d["full_master_qa"]=="BLOCKED"
+          assert d["release_approved"] is False
+          print("SIGNED_GITHUB_NATIVE_LIVEISO: VERIFIED_SCOPE_LIMITED")
+          PY
+          echo 'SIGNED LIVE ISO scope verified independently; FULL MASTER QA BLOCKED.' >> "$GITHUB_STEP_SUMMARY"
